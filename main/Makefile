@@ -1,9 +1,12 @@
 # Makefile
 
-.PHONY: test clean
+.PHONY: test clean manual-test
 
 test:
 	python -m unittest discover -s main/unitTest -p "test*.py"
+
+manual-test:
+	python main/manualTestImage.py
 
 clean:
 	find . -type f -name '*.pyc' -delete
