@@ -38,5 +38,6 @@ class TestImageProcessing(unittest.TestCase):
         cleaned = cleanBinary(binary)
         self.assertEqual(cleaned.dtype, np.uint8)
 
+
 if __name__ == "__main__":
     unittest.main()

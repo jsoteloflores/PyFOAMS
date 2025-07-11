@@ -1,9 +1,9 @@
 import cv2
 import numpy as np
 
-def findContours(binaryImage):
-    """Find contours of vesicles in binary image."""
-    contours, _ = cv2.findContours(binaryImage, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+def findContours(binary):
+    """Find all contours in a binary image"""
+    contours, _ = cv2.findContours(binary, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     return contours
 
 def measureVesicles(contours, pixelScale=1.0):
@@ -31,3 +31,4 @@ def measureVesicles(contours, pixelScale=1.0):
         })
 
     return vesicleData
+

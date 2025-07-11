@@ -1,6 +1,6 @@
 # Makefile
 
-.PHONY: test clean manual-test
+.PHONY: test clean manual-test test-gui
 
 test:
 	python -m unittest discover -s main/unitTest -p "test*.py"
@@ -12,3 +12,6 @@ clean:
 	find . -type f -name '*.pyc' -delete
 	find . -type d -name '__pycache__' -delete
 	rm -f dummy_test_image.png
+
+test-gui:
+	python main/testGui.py

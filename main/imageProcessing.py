@@ -25,3 +25,28 @@ def cleanBinary(binary, kernelSize=3):
     kernel = np.ones((kernelSize, kernelSize), np.uint8)
     cleaned = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
     return cleaned
+
+def separateVesicles(binary):
+    """Apply distance transform and watershed to separate touching vesicles"""
+    # Sure foreground area
+    dist = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
+    _, sure_fg = cv2.threshold(dist, 0.4 * dist.max(), 255, 0)
+    sure_fg = np.uint8(sure_fg)
+
+    # Sure background area
+    kernel = np.ones((3, 3), np.uint8)
+    sure_bg = cv2.dilate(binary, kernel, iterations=2)
+    unknown = cv2.subtract(sure_bg, sure_fg)
+
+    # Markers
+    _, markers = cv2.connectedComponents(sure_fg)
+    markers = markers + 1
+    markers[unknown == 255] = 0
+
+    # Apply watershed
+    markers = cv2.watershed(cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR), markers)
+
+    # Convert to clean binary mask again
+    separated = np.zeros_like(binary)
+    separated[markers > 1] = 255
+    return separated
