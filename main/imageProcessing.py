@@ -20,25 +20,32 @@ def thresholdImage(img, method="otsu", manualThresh=None):
         raise ValueError("Invalid thresholding method or missing manual threshold.")
     return binary
 
-def cleanBinary(binary, kernelSize=3):
+def cleanBinary(binary, *, kernel_size=3):
     """Apply morphological opening to remove noise"""
-    kernel = np.ones((kernelSize, kernelSize), np.uint8)
+    import cv2
+    import numpy as np
+    kernel = np.ones((kernel_size, kernel_size), np.uint8)
     cleaned = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
     return cleaned
 
+
 def separateVesicles(binary):
     """Apply distance transform and watershed to separate touching vesicles"""
-    # Sure foreground area
+    # Apply distance transform
     dist = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
-    _, sure_fg = cv2.threshold(dist, 0.4 * dist.max(), 255, 0)
+
+    # Threshold the distance transform to define sure foreground
+    _, sure_fg = cv2.threshold(dist, 0.5 * dist.max(), 255, 0)
     sure_fg = np.uint8(sure_fg)
 
-    # Sure background area
+    # Define sure background using dilation
     kernel = np.ones((3, 3), np.uint8)
-    sure_bg = cv2.dilate(binary, kernel, iterations=2)
+    sure_bg = cv2.dilate(binary, kernel, iterations=3)
+
+    # Define unknown region
     unknown = cv2.subtract(sure_bg, sure_fg)
 
-    # Markers
+    # Create markers for watershed
     _, markers = cv2.connectedComponents(sure_fg)
     markers = markers + 1
     markers[unknown == 255] = 0
@@ -46,7 +53,8 @@ def separateVesicles(binary):
     # Apply watershed
     markers = cv2.watershed(cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR), markers)
 
-    # Convert to clean binary mask again
+    # Convert markers to binary mask
     separated = np.zeros_like(binary)
     separated[markers > 1] = 255
+
     return separated

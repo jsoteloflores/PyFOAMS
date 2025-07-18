@@ -36,8 +36,33 @@ class FOAMSTestGUI:
         self.btnProcess = ttk.Button(self.frame, text="▶ Run Pipeline", command=self.processImage)
         self.btnProcess.grid(row=3, column=0, columnspan=3, pady=10)
 
+        ttk.Label(self.frame, text="Cleaning Method:").grid(row=4, column=0, sticky="w")
+        self.cleanVar = tk.StringVar(value="morph")
+        self.cleanDropdown = ttk.OptionMenu(self.frame, self.cleanVar, "morph", "morph", "blur", "none", command=self.toggleKernelSlider)
+        self.cleanDropdown.grid(row=4, column=1, columnspan=2, sticky="ew")
+
+        # Kernel size slider (for morph)
+        ttk.Label(self.frame, text="Kernel Size:").grid(row=5, column=0, sticky="w")
+        self.kernelSize = tk.IntVar(value=3)
+        self.kernelSlider = ttk.Scale(self.frame, from_=1, to=7, orient="horizontal", variable=self.kernelSize)
+        self.kernelSlider.grid(row=5, column=1, columnspan=2, sticky="ew")
+
+
     def toggleSlider(self, choice):
         self.slider.configure(state="normal" if choice == "manual" else "disabled")
+
+    def toggleKernelSlider(self, choice):
+        if choice == "morph":
+            self.kernelSlider.configure(state="normal")
+        else:
+            self.kernelSlider.configure(state="disabled")
+
+    def softCleanBinary(self, binary):
+        blurred = cv2.GaussianBlur(binary, (3, 3), 0)
+        _, cleaned = cv2.threshold(blurred, 127, 255, cv2.THRESH_BINARY)
+        return cleaned
+
+
 
     def loadImage(self):
         self.imagePath = filedialog.askopenfilename(filetypes=[("Image Files", "*.png *.jpg *.tif")])
@@ -64,8 +89,19 @@ class FOAMSTestGUI:
         cv2.imwrite(os.path.join(outDir, "2_binary.png"), binary)
 
         # Morphological cleaning
-        cleaned = cleanBinary(binary)
-        cv2.imwrite(os.path.join(outDir, "3_cleaned.png"), cleaned)
+        # Clean according to dropdown
+        cleanMethod = self.cleanVar.get()
+        if cleanMethod == "none":
+            cleaned = binary.copy()
+        elif cleanMethod == "morph":
+            k = int(self.kernelSize.get())
+            cleaned = cleanBinary(binary, kernel_size=k)
+        elif cleanMethod == "blur":
+            cleaned = self.softCleanBinary(binary)
+        else:
+            print(f"[!] Unknown cleaning method: {cleanMethod}")
+            cleaned = binary.copy()
+
 
         # Watershed separation
         separated = separateVesicles(cleaned)
