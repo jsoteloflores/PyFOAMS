@@ -33,7 +33,7 @@ class FOAMSTestGUI:
         self.slider.grid(row=2, column=1, columnspan=2, sticky="ew")
         self.slider.configure(state="disabled")
 
-        self.btnProcess = ttk.Button(self.frame, text="▶ Run Pipeline", command=self.processImage)
+        self.btnProcess = ttk.Button(self.frame, text="▶ Run Pipeline", command=self.updatePipeline)
         self.btnProcess.grid(row=3, column=0, columnspan=3, pady=10)
 
         ttk.Label(self.frame, text="Cleaning Method:").grid(row=4, column=0, sticky="w")
@@ -87,19 +87,25 @@ class FOAMSTestGUI:
             return
 
         outDir = "main/gui_outputs"
-        os.makedirs(outDir, exist_ok=True)
+        debugDir = os.path.join(outDir, "debugSteps")
+        os.makedirs(debugDir, exist_ok=True)
 
         print("[*] Processing image...")
 
+        # Ensure image is saved in compatible format
         grey = loadGreyscaleImage(self.imagePath)
-        cv2.imwrite(os.path.join(outDir, "1_grey.png"), grey)
+        grey = cv2.convertScaleAbs(grey)  # Convert to CV_8U
+        grey_path = os.path.join(outDir, "1_grey.png")
+        cv2.imwrite(grey_path, grey)
 
         # Thresholding
         if self.methodVar.get() == "manual":
             binary = thresholdImage(grey, method="manual", manualThresh=self.manualThresh.get())
         else:
             binary = thresholdImage(grey, method="otsu")
-        cv2.imwrite(os.path.join(outDir, "2_binary.png"), binary)
+        binary = cv2.convertScaleAbs(binary)  # Convert to CV_8U
+        binary_path = os.path.join(outDir, "2_binary.png")
+        cv2.imwrite(binary_path, binary)
 
         # Morphological cleaning
         cleanMethod = self.cleanVar.get()
@@ -113,10 +119,15 @@ class FOAMSTestGUI:
         else:
             print(f"[!] Unknown cleaning method: {cleanMethod}")
             cleaned = binary.copy()
+        cleaned = cv2.convertScaleAbs(cleaned)  # Convert to CV_8U
+        cleaned_path = os.path.join(debugDir, "3_cleaned.png")
+        cv2.imwrite(cleaned_path, cleaned)
 
         # Watershed separation
         separated = separateVesicles(cleaned)
-        cv2.imwrite(os.path.join(outDir, "4_separated.png"), separated)
+        separated = cv2.convertScaleAbs(separated)  # Convert to CV_8U
+        separated_path = os.path.join(debugDir, "4_separated.png")
+        cv2.imwrite(separated_path, separated)
 
         # Contour detection and measurement
         contours = findContours(separated)
@@ -125,19 +136,25 @@ class FOAMSTestGUI:
         # Draw contours
         contourOverlay = cv2.cvtColor(grey.copy(), cv2.COLOR_GRAY2BGR)
         cv2.drawContours(contourOverlay, contours, -1, (0, 255, 0), 1)
-        cv2.imwrite(os.path.join(outDir, "5_contours.png"), contourOverlay)
+        contour_path = os.path.join(debugDir, "5_contours.png")
+        cv2.imwrite(contour_path, contourOverlay)
 
         # Draw bounding boxes
         boxed = cv2.cvtColor(separated.copy(), cv2.COLOR_GRAY2BGR)
         for v in vesicles:
             x, y, w, h = v["boundingBox"]
             cv2.rectangle(boxed, (x, y), (x + w, y + h), (0, 0, 255), 1)
-        cv2.imwrite(os.path.join(outDir, "6_boxes.png"), boxed)
+        boxed_path = os.path.join(debugDir, "6_boxes.png")
+        cv2.imwrite(boxed_path, boxed)
 
         print(f"[✓] Output saved to {outDir}")
 
-        for fname in ["1_grey", "2_binary", "3_cleaned", "4_separated", "5_contours", "6_boxes"]:
-            img = cv2.imread(os.path.join(outDir, f"{fname}.png"))
+        for fname, path in zip(["1_grey", "2_binary", "3_cleaned", "4_separated", "5_contours", "6_boxes"],
+                               [grey_path, binary_path, cleaned_path, separated_path, contour_path, boxed_path]):
+            img = cv2.imread(path)
+            if img is None:
+                print(f"[!] Failed to load image: {path}")
+                continue
             cv2.imshow(fname, img)
         cv2.waitKey(1)
         cv2.destroyAllWindows()
