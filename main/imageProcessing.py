@@ -2,6 +2,7 @@
 
 import cv2
 import numpy as np
+import os
 
 def loadGreyscaleImage(path):
     """Load image as grayscale"""
@@ -34,13 +35,16 @@ def separateVesicles(binary):
     # Apply distance transform
     dist = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
 
+    # Normalize the distance transform for better sensitivity
+    dist = cv2.normalize(dist, None, 0, 255, cv2.NORM_MINMAX)
+
     # Threshold the distance transform to define sure foreground
-    _, sure_fg = cv2.threshold(dist, 0.5 * dist.max(), 255, 0)
+    _, sure_fg = cv2.threshold(dist, 0.3 * dist.max(), 255, 0)  # Lower threshold for better sensitivity
     sure_fg = np.uint8(sure_fg)
 
-    # Define sure background using dilation
-    kernel = np.ones((3, 3), np.uint8)
-    sure_bg = cv2.dilate(binary, kernel, iterations=3)
+    # Define sure background using less aggressive dilation
+    kernel = np.ones((2, 2), np.uint8)  # Smaller kernel size
+    sure_bg = cv2.dilate(binary, kernel, iterations=1)  # Reduced iterations
 
     # Define unknown region
     unknown = cv2.subtract(sure_bg, sure_fg)
@@ -56,5 +60,15 @@ def separateVesicles(binary):
     # Convert markers to binary mask
     separated = np.zeros_like(binary)
     separated[markers > 1] = 255
+
+    # Create debugSteps directory
+    debugDir = "main/gui_outputs/debugSteps"
+    os.makedirs(debugDir, exist_ok=True)
+
+    # Save intermediate images
+    cv2.imwrite(os.path.join(debugDir, "debug_dist_transform_adjusted.png"), dist)
+    cv2.imwrite(os.path.join(debugDir, "debug_sure_fg_adjusted.png"), sure_fg)
+    cv2.imwrite(os.path.join(debugDir, "debug_sure_bg_adjusted.png"), sure_bg)
+    cv2.imwrite(os.path.join(debugDir, "debug_unknown_adjusted.png"), unknown)
 
     return separated

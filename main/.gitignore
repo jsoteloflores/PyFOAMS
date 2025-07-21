@@ -29,3 +29,7 @@ venv/
 # OS-generated files
 .DS_Store
 Thumbs.db
+
+
+# Ignore debug images
+main/gui_outputs/debugSteps/

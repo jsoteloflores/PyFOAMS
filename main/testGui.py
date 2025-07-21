@@ -47,6 +47,17 @@ class FOAMSTestGUI:
         self.kernelSlider = ttk.Scale(self.frame, from_=1, to=7, orient="horizontal", variable=self.kernelSize)
         self.kernelSlider.grid(row=5, column=1, columnspan=2, sticky="ew")
 
+        # Sensitivity sliders for thresholds
+        ttk.Label(self.frame, text="Distance Transform Sensitivity:").grid(row=6, column=0, sticky="w")
+        self.distSensitivity = tk.DoubleVar(value=0.3)
+        self.distSlider = ttk.Scale(self.frame, from_=0.1, to=1.0, orient="horizontal", variable=self.distSensitivity, command=self.updatePipeline)
+        self.distSlider.grid(row=6, column=1, columnspan=2, sticky="ew")
+
+        ttk.Label(self.frame, text="Foreground Threshold:").grid(row=7, column=0, sticky="w")
+        self.fgThreshold = tk.DoubleVar(value=0.3)
+        self.fgSlider = ttk.Scale(self.frame, from_=0.1, to=1.0, orient="horizontal", variable=self.fgThreshold, command=self.updatePipeline)
+        self.fgSlider.grid(row=7, column=1, columnspan=2, sticky="ew")
+
 
     def toggleSlider(self, choice):
         self.slider.configure(state="normal" if choice == "manual" else "disabled")
@@ -68,7 +79,9 @@ class FOAMSTestGUI:
         self.imagePath = filedialog.askopenfilename(filetypes=[("Image Files", "*.png *.jpg *.tif")])
         if self.imagePath:
             print(f"[✓] Loaded image: {self.imagePath}")
-    def processImage(self):
+            self.updatePipeline()
+
+    def updatePipeline(self, *args):
         if not self.imagePath:
             print("No image loaded.")
             return
@@ -89,7 +102,6 @@ class FOAMSTestGUI:
         cv2.imwrite(os.path.join(outDir, "2_binary.png"), binary)
 
         # Morphological cleaning
-        # Clean according to dropdown
         cleanMethod = self.cleanVar.get()
         if cleanMethod == "none":
             cleaned = binary.copy()
@@ -101,7 +113,6 @@ class FOAMSTestGUI:
         else:
             print(f"[!] Unknown cleaning method: {cleanMethod}")
             cleaned = binary.copy()
-
 
         # Watershed separation
         separated = separateVesicles(cleaned)
@@ -128,7 +139,7 @@ class FOAMSTestGUI:
         for fname in ["1_grey", "2_binary", "3_cleaned", "4_separated", "5_contours", "6_boxes"]:
             img = cv2.imread(os.path.join(outDir, f"{fname}.png"))
             cv2.imshow(fname, img)
-        cv2.waitKey(0)
+        cv2.waitKey(1)
         cv2.destroyAllWindows()
 
 if __name__ == "__main__":
