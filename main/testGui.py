@@ -195,6 +195,40 @@ class FOAMSTestGUI:
             canvas.grid(row=row * 2 + 1, column=col, pady=(0, 10), padx=10)
             canvas.bind("<Configure>", lambda event, img_path=path, canvas=canvas: resize_image(event, img_path, canvas))
 
+    def autoSearchSensitivities(self):
+        print("[*] Searching for optimal sensitivities...")
+
+        grey = loadGreyscaleImage(self.imagePath)
+
+        # Define ranges for sensitivity search
+        dist_range = np.linspace(0.1, 1.0, 10)
+        fg_range = np.linspace(0.1, 1.0, 10)
+
+        best_dist = 0.3
+        best_fg = 0.3
+        best_metric = float('-inf')
+
+        for dist in dist_range:
+            for fg in fg_range:
+                binary = thresholdImage(grey, method="otsu", distSensitivity=dist, fgThreshold=fg)
+                metric = self.evaluateImageQuality(binary)
+
+                if metric > best_metric:
+                    best_metric = metric
+                    best_dist = dist
+                    best_fg = fg
+
+        print(f"[✓] Optimal sensitivities found: Distance Transform = {best_dist}, Foreground Threshold = {best_fg}")
+
+        # Update sliders with optimal values
+        self.distSensitivity.set(best_dist)
+        self.fgThreshold.set(best_fg)
+
+    def evaluateImageQuality(self, binary):
+        # Example metric: Count of edges detected
+        edges = cv2.Canny(binary, 100, 200)
+        return np.sum(edges > 0)
+
 if __name__ == "__main__":
     root = tk.Tk()
     app = FOAMSTestGUI(root)
