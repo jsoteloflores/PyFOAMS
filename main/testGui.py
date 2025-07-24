@@ -178,11 +178,28 @@ class FOAMSTestGUI:
 
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             img = Image.fromarray(img)
-            img = img.resize((event.width, event.height), Image.ANTIALIAS)
+            img = img.resize((event.width, event.height), Image.Resampling.LANCZOS)  # Updated attribute
             imgTk = ImageTk.PhotoImage(img)
 
             canvas.image = imgTk  # Keep a reference to avoid garbage collection
             canvas.create_image(0, 0, anchor="nw", image=imgTk)
+
+        def open_image_window(img_path):
+            if not os.path.exists(img_path):
+                print(f"[!] Image not found: {img_path}")
+                return
+
+            new_window = tk.Toplevel(self.master)
+            new_window.title("Image Viewer")
+
+            img = cv2.imread(img_path)
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(img)
+            imgTk = ImageTk.PhotoImage(img)
+
+            label = tk.Label(new_window, image=imgTk)
+            label.image = imgTk  # Keep a reference to avoid garbage collection
+            label.pack()
 
         for i, (title, path) in enumerate(steps):
             row = i // num_columns + 8  # Start at row 8
@@ -194,6 +211,7 @@ class FOAMSTestGUI:
             canvas = tk.Canvas(self.frame, width=200, height=200)
             canvas.grid(row=row * 2 + 1, column=col, pady=(0, 10), padx=10)
             canvas.bind("<Configure>", lambda event, img_path=path, canvas=canvas: resize_image(event, img_path, canvas))
+            canvas.bind("<Double-Button-1>", lambda event, img_path=path: open_image_window(img_path))
 
     def autoSearchSensitivities(self):
         print("[*] Searching for optimal sensitivities...")
@@ -223,6 +241,8 @@ class FOAMSTestGUI:
         # Update sliders with optimal values
         self.distSensitivity.set(best_dist)
         self.fgThreshold.set(best_fg)
+
+        print("[*] Sliders updated. You can fine-tune the settings if needed.")
 
     def evaluateImageQuality(self, binary):
         # Example metric: Count of edges detected
