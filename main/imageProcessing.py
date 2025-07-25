@@ -32,43 +32,27 @@ def cleanBinary(binary, *, kernel_size=3):
 
 def separateVesicles(binary):
     """Apply distance transform and watershed to separate touching vesicles"""
-    # Apply distance transform
-    dist = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
+    # Compute distance transform
+    dist_transform = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
 
-    # Normalize the distance transform for better sensitivity
-    dist = cv2.normalize(dist, None, 0, 255, cv2.NORM_MINMAX)
+    # Measure average equivalent diameter (D_eq)
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    areas = [cv2.contourArea(c) for c in contours]
+    avg_diameter = np.sqrt(4 * np.mean(areas) / np.pi) if areas else 0
 
-    # Threshold the distance transform to define sure foreground
-    _, sure_fg = cv2.threshold(dist, 0.3 * dist.max(), 255, 0)  # Lower threshold for better sensitivity
-    sure_fg = np.uint8(sure_fg)
+    # Threshold seed points at 0.6 * D_eq
+    seed_threshold = 0.6 * avg_diameter
+    _, markers = cv2.threshold(dist_transform, seed_threshold, 255, cv2.THRESH_BINARY)
 
-    # Define sure background using less aggressive dilation
-    kernel = np.ones((2, 2), np.uint8)  # Smaller kernel size
-    sure_bg = cv2.dilate(binary, kernel, iterations=1)  # Reduced iterations
+    # Convert markers to integer type
+    markers = np.uint8(markers)
 
-    # Define unknown region
-    unknown = cv2.subtract(sure_bg, sure_fg)
-
-    # Create markers for watershed
-    _, markers = cv2.connectedComponents(sure_fg)
-    markers = markers + 1
-    markers[unknown == 255] = 0
-
-    # Apply watershed
+    # Perform watershed
+    markers = cv2.connectedComponents(markers)[1]
     markers = cv2.watershed(cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR), markers)
 
-    # Convert markers to binary mask
+    # Create separated image
     separated = np.zeros_like(binary)
     separated[markers > 1] = 255
-
-    # Create debugSteps directory
-    debugDir = "main/gui_outputs/debugSteps"
-    os.makedirs(debugDir, exist_ok=True)
-
-    # Save intermediate images
-    cv2.imwrite(os.path.join(debugDir, "debug_dist_transform_adjusted.png"), dist)
-    cv2.imwrite(os.path.join(debugDir, "debug_sure_fg_adjusted.png"), sure_fg)
-    cv2.imwrite(os.path.join(debugDir, "debug_sure_bg_adjusted.png"), sure_bg)
-    cv2.imwrite(os.path.join(debugDir, "debug_unknown_adjusted.png"), unknown)
 
     return separated

@@ -59,6 +59,12 @@ class FOAMSTestGUI:
         self.fgSlider = ttk.Scale(self.frame, from_=0.1, to=1.0, orient="horizontal", variable=self.fgThreshold, command=self.updatePipeline)
         self.fgSlider.grid(row=7, column=1, columnspan=2, sticky="ew")
 
+        # Add a dropdown to select separation method
+        self.separationMethodVar = tk.StringVar(value="watershed")
+        ttk.Label(self.frame, text="Separation Method:").grid(row=8, column=0, sticky="w")
+        self.separationDropdown = ttk.OptionMenu(self.frame, self.separationMethodVar, "watershed", "watershed", "distance", command=self.updatePipeline)
+        self.separationDropdown.grid(row=8, column=1, columnspan=2, sticky="ew")
+
 
     def toggleSlider(self, choice):
         self.slider.configure(state="normal" if choice == "manual" else "disabled")
@@ -113,6 +119,16 @@ class FOAMSTestGUI:
         binary_path = os.path.join(outDir, "2_binary.png")
         cv2.imwrite(binary_path, binary)
 
+        # Save distance transform thresholding
+        dist_transform = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
+        dist_transform_path = os.path.join(debugDir, "debug_dist_transform.png")
+        cv2.imwrite(dist_transform_path, dist_transform)
+
+        # Save watershed thresholding
+        _, markers = cv2.threshold(dist_transform, self.distSensitivity.get() * 255, 255, cv2.THRESH_BINARY)
+        watershed_path = os.path.join(debugDir, "debug_watershed.png")
+        cv2.imwrite(watershed_path, markers)
+
         # Morphological cleaning
         cleanMethod = self.cleanVar.get()
         if cleanMethod == "none":
@@ -130,7 +146,10 @@ class FOAMSTestGUI:
         cv2.imwrite(cleaned_path, cleaned)
 
         # Watershed separation
-        separated = separateVesicles(cleaned)
+        if self.separationMethodVar.get() == "distance":
+            separated = dist_transform.copy()
+        else:
+            separated = separateVesicles(cleaned)
         separated = cv2.convertScaleAbs(separated)  # Convert to CV_8U
         separated_path = os.path.join(debugDir, "4_separated.png")
         cv2.imwrite(separated_path, separated)
@@ -140,18 +159,22 @@ class FOAMSTestGUI:
         vesicles = measureVesicles(contours, pixelScale=self.pixelScale)
 
         # Draw contours
-        contourOverlay = cv2.cvtColor(grey.copy(), cv2.COLOR_GRAY2BGR)
+        contourOverlay = cv2.cvtColor(cleaned.copy(), cv2.COLOR_GRAY2BGR)
         cv2.drawContours(contourOverlay, contours, -1, (0, 255, 0), 1)
         contour_path = os.path.join(debugDir, "5_contours.png")
         cv2.imwrite(contour_path, contourOverlay)
 
-        # Draw bounding boxes
-        boxed = cv2.cvtColor(separated.copy(), cv2.COLOR_GRAY2BGR)
-        for v in vesicles:
-            x, y, w, h = v["boundingBox"]
-            cv2.rectangle(boxed, (x, y), (x + w, y + h), (0, 0, 255), 1)
-        boxed_path = os.path.join(debugDir, "6_boxes.png")
-        cv2.imwrite(boxed_path, boxed)
+        # Ensure bounding boxes are drawn correctly
+        if vesicles:
+            boxed = cv2.cvtColor(cleaned.copy(), cv2.COLOR_GRAY2BGR)
+            for v in vesicles:
+                x, y, w, h = v["boundingBox"]
+                cv2.rectangle(boxed, (x, y), (x + w, y + h), (0, 0, 255), 1)
+            boxed_path = os.path.join(debugDir, "6_boxes.png")
+            cv2.imwrite(boxed_path, boxed)
+        else:
+            boxed_path = os.path.join(debugDir, "6_boxes.png")
+            print("[!] No vesicles detected for bounding boxes.")
 
         print(f"[✓] Output saved to {outDir}")
 
@@ -159,14 +182,12 @@ class FOAMSTestGUI:
         steps = [
             ("Step 1: Greyscale", grey_path),
             ("Step 2: Binary", binary_path),
-            ("Step 3: Cleaned", cleaned_path),
-            ("Step 4: Separated", separated_path),
-            ("Step 5: Contours", contour_path),
-            ("Step 6: Boxes", boxed_path),
-            ("Debug: Cleaned", cleaned_path),
-            ("Debug: Separated", separated_path),
-            ("Debug: Contours", contour_path),
-            ("Debug: Boxes", boxed_path)
+            ("Step 3: Distance Transform", dist_transform_path),
+            ("Step 4: Watershed", watershed_path),
+            ("Step 5: Cleaned", cleaned_path),
+            ("Step 6: Separated", separated_path),
+            ("Step 7: Contours", contour_path),
+            ("Step 8: Boxes", boxed_path)
         ]
 
         num_columns = 3  # Number of columns in the grid
@@ -185,21 +206,8 @@ class FOAMSTestGUI:
             canvas.create_image(0, 0, anchor="nw", image=imgTk)
 
         def open_image_window(img_path):
-            if not os.path.exists(img_path):
-                print(f"[!] Image not found: {img_path}")
-                return
-
-            new_window = tk.Toplevel(self.master)
-            new_window.title("Image Viewer")
-
-            img = cv2.imread(img_path)
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            img = Image.fromarray(img)
-            imgTk = ImageTk.PhotoImage(img)
-
-            label = tk.Label(new_window, image=imgTk)
-            label.image = imgTk  # Keep a reference to avoid garbage collection
-            label.pack()
+            viewer = ZoomPanImageViewer(self.master, img_path)
+            viewer.grab_set()  # Make the viewer modal
 
         for i, (title, path) in enumerate(steps):
             row = i // num_columns + 8  # Start at row 8
@@ -248,6 +256,58 @@ class FOAMSTestGUI:
         # Example metric: Count of edges detected
         edges = cv2.Canny(binary, 100, 200)
         return np.sum(edges > 0)
+
+# Add zooming and panning functionality to the image viewer
+class ZoomPanImageViewer(tk.Toplevel):
+    def __init__(self, master, img_path):
+        super().__init__(master)
+        self.title("Image Viewer")
+
+        self.img = cv2.imread(img_path)
+        if self.img is None:
+            print(f"[!] Image not found: {img_path}")
+            self.destroy()
+            return
+
+        self.img = cv2.cvtColor(self.img, cv2.COLOR_BGR2RGB)
+        self.img = Image.fromarray(self.img)
+        self.imgTk = ImageTk.PhotoImage(self.img)
+
+        self.canvas = tk.Canvas(self, width=self.img.width, height=self.img.height)
+        self.canvas.pack(fill="both", expand=True)
+
+        self.canvas.create_image(0, 0, anchor="nw", image=self.imgTk)
+
+        self.canvas.bind("<ButtonPress-1>", self.start_pan)
+        self.canvas.bind("<B1-Motion>", self.pan)
+        self.canvas.bind("<MouseWheel>", self.zoom)
+
+        self.offset_x = 0
+        self.offset_y = 0
+        self.scale = 1.0
+
+    def start_pan(self, event):
+        self.start_x = event.x
+        self.start_y = event.y
+
+    def pan(self, event):
+        dx = event.x - self.start_x
+        dy = event.y - self.start_y
+
+        self.offset_x += dx
+        self.offset_y += dy
+
+        self.canvas.scan_dragto(-dx, -dy, gain=1)
+
+        self.start_x = event.x
+        self.start_y = event.y
+
+    def zoom(self, event):
+        scale_factor = 1.1 if event.delta > 0 else 0.9
+        self.scale *= scale_factor
+
+        self.canvas.scale("all", event.x, event.y, scale_factor, scale_factor)
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
 if __name__ == "__main__":
     root = tk.Tk()

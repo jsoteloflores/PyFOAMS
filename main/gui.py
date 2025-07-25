@@ -38,9 +38,7 @@ class PyFOAMS_GUI:
     def loadImage(self):
         self.imagePath = filedialog.askopenfilename(filetypes=[("Image Files", "*.png *.jpg *.tif")])
         if self.imagePath:
-            raw_image = cv2.imread(self.imagePath, cv2.IMREAD_GRAYSCALE)
-            binary = thresholdImage(raw_image, method="otsu")
-            self.image = cleanBinary(binary, kernel_size=3)  # Process to cleaned black-and-white
+            self.image = cv2.imread(self.imagePath, cv2.IMREAD_GRAYSCALE)
             self.displayImage()
             self.btnLoad.config(text="Image Loaded", state=tk.DISABLED)
 
@@ -53,48 +51,6 @@ class PyFOAMS_GUI:
 
         self.canvas.image = imgTk  # Keep a reference to avoid garbage collection
         self.canvas.create_image(0, 0, anchor="nw", image=imgTk)
-
-        # Enable drawing functionality
-        self.canvas.bind("<B1-Motion>", self.paint)
-        self.canvas.bind("<Button-1>", self.startPaint)
-        self.canvas.bind("<ButtonRelease-1>", self.endPaint)
-
-        self.painting = False
-        self.brushSize = 5
-        self.brushColor = 0  # Black for adding pore space
-
-        self.eraseMode = False  # Toggle between paint and erase
-
-    # Paintbrush functionality
-    def startPaint(self, event):
-        self.painting = True
-
-    def endPaint(self, event):
-        self.painting = False
-
-    def paint(self, event):
-        if not self.painting or self.image is None:
-            return
-
-        x, y = event.x, event.y
-        brushSize = self.brushSize
-
-        # Convert canvas coordinates to image coordinates
-        imgX = int(x * self.image.shape[1] / self.canvas.winfo_width())
-        imgY = int(y * self.image.shape[0] / self.canvas.winfo_height())
-
-        # Apply brush or erase
-        if self.eraseMode:
-            cv2.circle(self.image, (imgX, imgY), brushSize, 255, -1)  # White for erasing
-        else:
-            cv2.circle(self.image, (imgX, imgY), brushSize, self.brushColor, -1)  # Black for painting
-
-        self.displayImage()
-
-    # Toggle erase mode
-    def toggleEraseMode(self):
-        self.eraseMode = not self.eraseMode
-        print("Erase mode" if self.eraseMode else "Paint mode")
 
     def activatePaintbrush(self):
         print("Paintbrush tool activated.")
