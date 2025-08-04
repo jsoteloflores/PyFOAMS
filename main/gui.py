@@ -31,6 +31,9 @@ class PyFOAMS_GUI:
         self.erodeTool = ttk.Button(self.toolbar, text="Erode Tool", command=self.activateErode)
         self.erodeTool.pack(side=tk.LEFT, padx=5, pady=5)
 
+        self.cropTool = ttk.Button(self.toolbar, text="Crop Tool", command=self.activateCrop)
+        self.cropTool.pack(side=tk.LEFT, padx=5, pady=5)
+
         # Create canvas for image
         self.canvas = tk.Canvas(master, bg="white")
         self.canvas.pack(fill=tk.BOTH, expand=True)
@@ -63,6 +66,10 @@ class PyFOAMS_GUI:
 
     def activateErode(self):
         print("Erode tool activated.")
+
+    def activateCrop(self):
+        print("Crop tool activated.")
+        
 
 if __name__ == "__main__":
     root = tk.Tk()
