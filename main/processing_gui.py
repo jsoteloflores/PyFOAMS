@@ -1,0 +1,466 @@
+# processing_gui.py
+# Step 2 GUI: Thresholding + Separation with live preview
+from __future__ import annotations
+import os
+import cv2
+import numpy as np
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+from typing import List, Dict, Optional
+
+from PIL import Image, ImageTk
+
+# Pillow shim
+if hasattr(Image, "Resampling"):
+    RESAMPLE_LANCZOS = Image.Resampling.LANCZOS
+else:
+    RESAMPLE_LANCZOS = getattr(Image, "LANCZOS", Image.BICUBIC)
+
+from processing import (
+    DEFAULTS,
+    thresholdImageAdvanced,
+    runSeparationPipeline,
+    labelsToColor,
+)
+
+class ProcessingWindow(tk.Toplevel):
+    def __init__(self, parent,
+                 images: List[np.ndarray],
+                 paths: Optional[List[str]] = None,
+                 scales: Optional[List[Optional[Dict[str, float | str]]]] = None):
+        super().__init__(parent)
+        self.title("PyFOAMS – Processing (Threshold + Separation)")
+        self.transient(parent)
+        self.grab_set()
+
+        # Data
+        self.images = images
+        self.paths = paths or [f"Image {i+1}" for i in range(len(images))]
+        self.scales = scales or [None] * len(images)
+        self.currentIndex = 0
+
+        # Outputs
+        self.binaries: List[Optional[np.ndarray]] = [None] * len(images)
+        self.labels:   List[Optional[np.ndarray]] = [None] * len(images)
+
+        # Settings (copy defaults)
+        self.settings = {
+            "common": dict(DEFAULTS["common"]),
+            "otsu": dict(DEFAULTS["otsu"]),
+            "adaptive": dict(DEFAULTS["adaptive"]),
+            "percentile": dict(DEFAULTS["percentile"]),
+            "pick": dict(DEFAULTS["pick"]),
+            "separation": dict(DEFAULTS["separation"]),
+        }
+
+        # GUI state vars
+        self.methodVar = tk.StringVar(value="otsu")
+        self.useDefaultsVar = tk.BooleanVar(value=True)
+        self.polarityVar = tk.StringVar(value=self.settings["common"]["polarity"])
+
+        # Pick mode
+        self.pickModeVar = tk.BooleanVar(value=False)
+        self.pickValueVar = tk.IntVar(value=128)
+        self.pickTolVar = tk.IntVar(value=int(self.settings["pick"]["pickTolerance"]))
+
+        # Separation
+        self.sepMethodVar = tk.StringVar(value=self.settings["separation"]["method"])
+        self.fillHolesVar = tk.BooleanVar(value=bool(self.settings["separation"]["fillHoles"]))
+        self.minAreaVar = tk.IntVar(value=int(self.settings["separation"]["minAreaPx"]))
+        self.distanceBlurVar = tk.IntVar(value=int(self.settings["separation"]["distanceBlurK"]))
+        self.peakMinDistVar = tk.IntVar(value=int(self.settings["separation"]["peakMinDistance"]))
+        self.peakRelThrVar = tk.DoubleVar(value=float(self.settings["separation"]["peakRelThreshold"]))
+        self.connectivityVar = tk.IntVar(value=int(self.settings["separation"]["connectivity"]))
+        self.clearBorderVar = tk.BooleanVar(value=bool(self.settings["separation"]["clearBorder"]))
+        self.overlayAlphaVar = tk.DoubleVar(value=float(self.settings["separation"]["overlayAlpha"]))
+
+        # View mode
+        self.viewModeVar = tk.StringVar(value="labels")  # "binary" | "labels"
+        self.overlayOnOriginalVar = tk.BooleanVar(value=True)
+
+        # UI
+        self._buildUi()
+        self._bindEvents()
+        self._showCurrent()
+
+        self.geometry("1280x800")
+        self.minsize(980, 640)
+
+    # ----------------- UI -----------------
+
+    def _buildUi(self):
+        # Top controls
+        top = ttk.Frame(self); top.pack(side="top", fill="x", padx=6, pady=6)
+
+        ttk.Button(top, text="Prev", command=self.prevImage).pack(side="left", padx=2)
+        ttk.Button(top, text="Next", command=self.nextImage).pack(side="left", padx=2)
+        self.statusVar = tk.StringVar(value="")
+        ttk.Label(top, textvariable=self.statusVar).pack(side="left", padx=10)
+
+        ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=10)
+
+        # Threshold method + defaults + advanced
+        ttk.Label(top, text="Method:").pack(side="left")
+        for text, val in [("Otsu", "otsu"), ("Adaptive", "adaptive"), ("Percentile", "percentile"), ("Pick", "pick")]:
+            ttk.Radiobutton(top, text=text, variable=self.methodVar, value=val).pack(side="left", padx=4)
+
+        ttk.Checkbutton(top, text="Use defaults", variable=self.useDefaultsVar).pack(side="left", padx=12)
+        ttk.Button(top, text="Advanced…", command=self.openAdvancedDialog).pack(side="left")
+
+        ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=10)
+
+        ttk.Label(top, text="Polarity:").pack(side="left")
+        for text, val in [("Auto", "auto"), ("Pores darker", "poresDarker"), ("Pores brighter", "poresBrighter")]:
+            ttk.Radiobutton(top, text=text, variable=self.polarityVar, value=val).pack(side="left", padx=4)
+
+        # Pick controls
+        self.pickPanel = ttk.Frame(self); self.pickPanel.pack(side="top", fill="x", padx=6)
+        ttk.Checkbutton(self.pickPanel, text="Pick from image (click left)", variable=self.pickModeVar).pack(side="left")
+        ttk.Label(self.pickPanel, text="Gray:").pack(side="left", padx=(10, 2))
+        ttk.Entry(self.pickPanel, textvariable=self.pickValueVar, width=5).pack(side="left")
+        ttk.Label(self.pickPanel, text="± tol").pack(side="left", padx=(8, 2))
+        ttk.Scale(self.pickPanel, from_=0, to=60, orient="horizontal", variable=self.pickTolVar, length=150).pack(side="left")
+        self._updatePickPanelVisibility()
+
+        # Separation panel
+        sep = ttk.LabelFrame(self, text="Separation"); sep.pack(side="top", fill="x", padx=6, pady=6)
+        ttk.Label(sep, text="Method:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        ttk.Radiobutton(sep, text="None", value="none", variable=self.sepMethodVar).grid(row=0, column=1, sticky="w")
+        ttk.Radiobutton(sep, text="Watershed", value="watershed", variable=self.sepMethodVar).grid(row=0, column=2, sticky="w")
+
+        ttk.Checkbutton(sep, text="Fill holes", variable=self.fillHolesVar).grid(row=1, column=0, sticky="w", padx=6)
+        ttk.Label(sep, text="Min area (px)").grid(row=1, column=1, sticky="e"); ttk.Entry(sep, textvariable=self.minAreaVar, width=7).grid(row=1, column=2, sticky="w")
+
+        ttk.Label(sep, text="Distance blur k").grid(row=2, column=0, sticky="e"); ttk.Entry(sep, textvariable=self.distanceBlurVar, width=7).grid(row=2, column=1, sticky="w")
+        ttk.Label(sep, text="Peak min distance").grid(row=2, column=2, sticky="e"); ttk.Entry(sep, textvariable=self.peakMinDistVar, width=7).grid(row=2, column=3, sticky="w")
+        ttk.Label(sep, text="Peak rel threshold").grid(row=2, column=4, sticky="e"); ttk.Entry(sep, textvariable=self.peakRelThrVar, width=7).grid(row=2, column=5, sticky="w")
+
+        ttk.Label(sep, text="Connectivity").grid(row=3, column=0, sticky="e")
+        ttk.Radiobutton(sep, text="4", variable=self.connectivityVar, value=4).grid(row=3, column=1, sticky="w")
+        ttk.Radiobutton(sep, text="8", variable=self.connectivityVar, value=8).grid(row=3, column=2, sticky="w")
+        ttk.Checkbutton(sep, text="Clear border", variable=self.clearBorderVar).grid(row=3, column=3, sticky="w")
+
+        ttk.Label(sep, text="Overlay alpha").grid(row=3, column=4, sticky="e"); ttk.Entry(sep, textvariable=self.overlayAlphaVar, width=7).grid(row=3, column=5, sticky="w")
+
+        # View panel
+        view = ttk.LabelFrame(self, text="View"); view.pack(side="top", fill="x", padx=6, pady=4)
+        ttk.Radiobutton(view, text="Binary", value="binary", variable=self.viewModeVar).pack(side="left", padx=6)
+        ttk.Radiobutton(view, text="Labels", value="labels", variable=self.viewModeVar).pack(side="left", padx=6)
+        ttk.Checkbutton(view, text="Overlay on original", variable=self.overlayOnOriginalVar).pack(side="left", padx=12)
+
+        # Canvases
+        center = ttk.Frame(self); center.pack(side="top", fill="both", expand=True, padx=6, pady=6)
+        self.leftCanvas = tk.Canvas(center, bg="#202020", highlightthickness=1, highlightbackground="#3a3a3a")
+        self.rightCanvas = tk.Canvas(center, bg="#202020", highlightthickness=1, highlightbackground="#3a3a3a")
+        self.leftCanvas.pack(side="left", fill="both", expand=True)
+        self.rightCanvas.pack(side="left", fill="both", expand=True)
+        self._leftPhoto = None; self._rightPhoto = None
+        self._leftScale = 1.0;   self._rightScale = 1.0
+
+        # Bottom actions
+        bottom = ttk.Frame(self); bottom.pack(side="bottom", fill="x", padx=6, pady=6)
+        ttk.Button(bottom, text="Apply to Current", command=self.applyToCurrent).pack(side="left")
+        ttk.Button(bottom, text="Apply to All", command=self.applyToAll).pack(side="left", padx=6)
+        ttk.Button(bottom, text="Save Masks…", command=self.saveMasks).pack(side="left", padx=6)
+        ttk.Button(bottom, text="Save Labels…", command=self.saveLabels).pack(side="left", padx=6)
+
+    def _bindEvents(self):
+        for var in (self.methodVar, self.useDefaultsVar, self.polarityVar,
+                    self.sepMethodVar, self.fillHolesVar, self.minAreaVar, self.distanceBlurVar,
+                    self.peakMinDistVar, self.peakRelThrVar, self.connectivityVar,
+                    self.clearBorderVar, self.overlayAlphaVar, self.viewModeVar, self.overlayOnOriginalVar):
+            var.trace_add("write", lambda *_: self._recomputePreview())
+        self.pickValueVar.trace_add("write", lambda *_: self._recomputePreview())
+        self.pickTolVar.trace_add("write", lambda *_: self._recomputePreview())
+
+        self.leftCanvas.bind("<Button-1>", self._onLeftClickPick)
+        self.leftCanvas.bind("<Configure>", lambda e: self._showCurrent())
+        self.rightCanvas.bind("<Configure>", lambda e: self._recomputePreview())
+
+    # ----------------- Navigation -----------------
+
+    def prevImage(self):
+        if self.currentIndex > 0:
+            self.currentIndex -= 1
+            self._showCurrent()
+
+    def nextImage(self):
+        if self.currentIndex < len(self.images) - 1:
+            self.currentIndex += 1
+            self._showCurrent()
+
+    # ----------------- Display -----------------
+
+    def _npToPil(self, arr):
+        a = np.asarray(arr)
+        if a.ndim == 3 and a.shape[2] == 3:
+            a = cv2.cvtColor(a, cv2.COLOR_BGR2RGB)
+            return Image.fromarray(a, mode="RGB")
+        if a.ndim == 2:
+            if a.dtype != np.uint8:
+                a = cv2.normalize(a.astype(np.float32), None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+            return Image.fromarray(a, mode="L")
+        if a.ndim == 3 and a.shape[2] == 4:
+            a = cv2.cvtColor(a, cv2.COLOR_BGRA2RGBA)
+            return Image.fromarray(a, mode="RGBA")
+        g = a.mean(axis=2).astype(np.uint8) if a.ndim == 3 else a.astype(np.uint8)
+        return Image.fromarray(g, mode="L")
+
+    def _displayOn(self, canvas, pilImg, keepScaleAttr, photoAttr):
+        canvas.update_idletasks()
+        cw, ch = max(1, canvas.winfo_width()), max(1, canvas.winfo_height())
+        iw, ih = pilImg.size
+        s = min(cw / float(iw), ch / float(ih)); s = min(s, 1.0)
+        new_w = max(1, int(round(iw * s))); new_h = max(1, int(round(ih * s)))
+        if (new_w, new_h) != (iw, ih):
+            pilImg = pilImg.resize((new_w, new_h), resample=RESAMPLE_LANCZOS)
+        canvas.delete("all")
+        photo = ImageTk.PhotoImage(pilImg)
+        setattr(self, photoAttr, photo)
+        setattr(self, keepScaleAttr, s)
+        canvas.create_image((cw - new_w) // 2, (ch - new_h) // 2, anchor="nw", image=photo)
+
+    def _showCurrent(self):
+        img = self.images[self.currentIndex]
+        self._displayOn(self.leftCanvas, self._npToPil(img), "_leftScale", "_leftPhoto")
+        self._recomputePreview()
+        self.statusVar.set(f"{os.path.basename(self.paths[self.currentIndex])}  ({self.currentIndex+1}/{len(self.images)})")
+
+    # ----------------- Parameters -----------------
+
+    def _currentThreshParams(self) -> Dict[str, float | int | bool | str]:
+        m = self.methodVar.get()
+        params = dict(self.settings["common"])
+        params["polarity"] = self.polarityVar.get()
+        if m != "pick":
+            if not self.useDefaultsVar.get():
+                params.update(self.settings[m])
+            else:
+                params.update(DEFAULTS[m])
+        else:
+            params.update(self.settings["pick"])
+            params["pickTolerance"] = int(self.pickTolVar.get())
+            params["pickValue"] = int(self.pickValueVar.get())
+        return params
+
+    def _currentSepParams(self) -> Dict[str, float | int | bool | str]:
+        s = self.settings["separation"]
+        params = {
+            "method": self.sepMethodVar.get(),
+            "fillHoles": bool(self.fillHolesVar.get()),
+            "minAreaPx": int(self.minAreaVar.get()),
+            "distanceBlurK": int(self.distanceBlurVar.get()),
+            "peakMinDistance": int(self.peakMinDistVar.get()),
+            "peakRelThreshold": float(self.peakRelThrVar.get()),
+            "connectivity": int(self.connectivityVar.get()),
+            "clearBorder": bool(self.clearBorderVar.get()),
+            "overlayAlpha": float(self.overlayAlphaVar.get()),
+        }
+        return params
+
+    # ----------------- Preview -----------------
+
+    def _recomputePreview(self):
+        if not self.images:
+            return
+        img = self.images[self.currentIndex]
+        method = self.methodVar.get()
+        tparams = self._currentThreshParams()
+        sparams = self._currentSepParams()
+
+        try:
+            if method == "pick" and "pickValue" not in tparams:
+                # wait until user picks something
+                gray = self._prepGrayLocal(img)
+                preview = np.zeros_like(gray)
+                labels = None
+            else:
+                binary, labels, _ = runSeparationPipeline(img, tparams, sparams)
+                preview = binary if (self.viewModeVar.get() == "binary" or labels is None) else \
+                          self._labelsPreview(labels, img, sparams)
+        except Exception as e:
+            self.statusVar.set(f"Error: {e}")
+            return
+
+        self._lastBinary = binary if 'binary' in locals() else None
+        self._lastLabels = labels if 'labels' in locals() else None
+
+        # Left = original, Right = preview
+        self._displayOn(self.leftCanvas, self._npToPil(img), "_leftScale", "_leftPhoto")
+        self._displayOn(self.rightCanvas, self._npToPil(preview), "_rightScale", "_rightPhoto")
+
+    def _labelsPreview(self, labels: np.ndarray, img, sparams) -> np.ndarray:
+        alpha = float(np.clip(sparams.get("overlayAlpha", 0.45), 0.0, 1.0))
+        gray = self._prepGrayLocal(img) if self.overlayOnOriginalVar.get() else None
+        return labelsToColor(labels, bgGray=gray, alpha=alpha)
+
+    def _prepGrayLocal(self, src) -> np.ndarray:
+        a = src
+        if a.ndim == 3:
+            a = cv2.cvtColor(a, cv2.COLOR_BGR2GRAY)
+        if a.dtype != np.uint8:
+            a = cv2.normalize(a.astype(np.float32), None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        return a
+
+    # ----------------- Eyedropper -----------------
+
+    def _onLeftClickPick(self, event):
+        if not self.pickModeVar.get() and self.methodVar.get() != "pick":
+            return
+        img = self.images[self.currentIndex]
+        s = getattr(self, "_leftScale", 1.0)
+        x = int(event.x / max(s, 1e-6))
+        y = int(event.y / max(s, 1e-6))
+        gray = self._prepGrayLocal(img)
+        h, w = gray.shape[:2]
+        if 0 <= x < w and 0 <= y < h:
+            self.pickValueVar.set(int(gray[y, x]))
+            self._recomputePreview()
+
+    # ----------------- Advanced dialogs -----------------
+
+    def openAdvancedDialog(self):
+        method = self.methodVar.get()
+        self._openAdvancedFor(method)
+
+    def _openAdvancedFor(self, method: str):
+        dlg = tk.Toplevel(self)
+        dlg.title(f"Advanced Settings – {method.capitalize()}")
+        dlg.transient(self); dlg.grab_set()
+
+        # Common preprocessing
+        row = 0
+        cmn = self.settings["common"]
+        useCLAHEVar = tk.BooleanVar(value=bool(cmn["useCLAHE"]))
+        claheClipVar = tk.DoubleVar(value=float(cmn["claheClip"]))
+        claheTileVar = tk.IntVar(value=int(cmn["claheTile"]))
+        medianKVar = tk.IntVar(value=int(cmn["medianK"]))
+        gaussianKVar = tk.IntVar(value=int(cmn["gaussianK"]))
+        applyOpenCloseVar = tk.BooleanVar(value=bool(cmn["applyOpenClose"]))
+        morphKVar = tk.IntVar(value=int(cmn["morphK"]))
+
+        ttk.Label(dlg, text="Common preprocessing").grid(row=row, column=0, columnspan=4, pady=(8,4), sticky="w"); row += 1
+        ttk.Checkbutton(dlg, text="CLAHE", variable=useCLAHEVar).grid(row=row, column=0, sticky="w", padx=8)
+        ttk.Label(dlg, text="Clip").grid(row=row, column=1, sticky="e"); ttk.Entry(dlg, textvariable=claheClipVar, width=8).grid(row=row, column=2, sticky="w"); row += 1
+        ttk.Label(dlg, text="Tile").grid(row=row, column=1, sticky="e"); ttk.Entry(dlg, textvariable=claheTileVar, width=8).grid(row=row, column=2, sticky="w"); row += 1
+        ttk.Label(dlg, text="Median k (0=off)").grid(row=row, column=1, sticky="e"); ttk.Entry(dlg, textvariable=medianKVar, width=8).grid(row=row, column=2, sticky="w"); row += 1
+        ttk.Label(dlg, text="Gaussian k (0=off)").grid(row=row, column=1, sticky="e"); ttk.Entry(dlg, textvariable=gaussianKVar, width=8).grid(row=row, column=2, sticky="w"); row += 1
+        ttk.Checkbutton(dlg, text="Preview cleanup (open+close)", variable=applyOpenCloseVar).grid(row=row, column=0, sticky="w", padx=8); row += 1
+        ttk.Label(dlg, text="Morph k").grid(row=row, column=1, sticky="e"); ttk.Entry(dlg, textvariable=morphKVar, width=8).grid(row=row, column=2, sticky="w"); row += 1
+
+        # Method-specific
+        if method == "adaptive":
+            ad = self.settings["adaptive"]
+            adaptiveBlockVar = tk.IntVar(value=int(ad["adaptiveBlock"]))
+            adaptiveCVar = tk.IntVar(value=int(ad["adaptiveC"]))
+            ttk.Label(dlg, text="Adaptive").grid(row=row, column=0, columnspan=4, pady=(8,4), sticky="w"); row += 1
+            ttk.Label(dlg, text="Block (odd)").grid(row=row, column=1, sticky="e"); ttk.Entry(dlg, textvariable=adaptiveBlockVar, width=8).grid(row=row, column=2, sticky="w"); row += 1
+            ttk.Label(dlg, text="C").grid(row=row, column=1, sticky="e"); ttk.Entry(dlg, textvariable=adaptiveCVar, width=8).grid(row=row, column=2, sticky="w"); row += 1
+        elif method == "percentile":
+            pe = self.settings["percentile"]
+            percentileVar = tk.DoubleVar(value=float(pe["percentile"]))
+            ttk.Label(dlg, text="Percentile").grid(row=row, column=0, columnspan=4, pady=(8,4), sticky="w"); row += 1
+            ttk.Label(dlg, text="Percentile (0..100)").grid(row=row, column=1, sticky="e"); ttk.Entry(dlg, textvariable=percentileVar, width=8).grid(row=row, column=2, sticky="w"); row += 1
+        elif method == "pick":
+            pk = self.settings["pick"]
+            pickTolVar = tk.IntVar(value=int(pk["pickTolerance"]))
+            ttk.Label(dlg, text="Pick").grid(row=row, column=0, columnspan=4, pady=(8,4), sticky="w"); row += 1
+            ttk.Label(dlg, text="Tolerance ±").grid(row=row, column=1, sticky="e"); ttk.Entry(dlg, textvariable=pickTolVar, width=8).grid(row=row, column=2, sticky="w"); row += 1
+
+        # Buttons
+        row += 1
+        btns = ttk.Frame(dlg); btns.grid(row=row, column=0, columnspan=4, pady=(10,8))
+        def on_ok():
+            cmn = self.settings["common"]
+            cmn["useCLAHE"] = bool(useCLAHEVar.get())
+            cmn["claheClip"] = float(claheClipVar.get())
+            cmn["claheTile"] = int(claheTileVar.get())
+            cmn["medianK"] = int(medianKVar.get())
+            cmn["gaussianK"] = int(gaussianKVar.get())
+            cmn["applyOpenClose"] = bool(applyOpenCloseVar.get())
+            cmn["morphK"] = int(morphKVar.get())
+
+            if method == "adaptive":
+                self.settings["adaptive"]["adaptiveBlock"] = int(adaptiveBlockVar.get())
+                self.settings["adaptive"]["adaptiveC"] = int(adaptiveCVar.get())
+            elif method == "percentile":
+                self.settings["percentile"]["percentile"] = float(percentileVar.get())
+            elif method == "pick":
+                self.settings["pick"]["pickTolerance"] = int(pickTolVar.get())
+
+            dlg.destroy()
+            self.useDefaultsVar.set(False)
+            self._recomputePreview()
+        def on_cancel():
+            dlg.destroy()
+
+        ttk.Button(btns, text="OK", command=on_ok).pack(side="left", padx=8)
+        ttk.Button(btns, text="Cancel", command=on_cancel).pack(side="left", padx=8)
+
+    def _updatePickPanelVisibility(self):
+        if self.methodVar.get() == "pick":
+            self.pickPanel.pack(side="top", fill="x", padx=6)
+        else:
+            self.pickPanel.forget()
+
+    # ----------------- Apply / Save -----------------
+
+    def applyToCurrent(self):
+        if not hasattr(self, "_lastBinary"):
+            messagebox.showwarning("Apply", "Nothing to apply yet.")
+            return
+        idx = self.currentIndex
+        self.binaries[idx] = None if self._lastBinary is None else self._lastBinary.copy()
+        self.labels[idx]   = None if self._lastLabels is None else self._lastLabels.copy()
+        messagebox.showinfo("Apply", "Applied to current image.")
+
+    def applyToAll(self):
+        if not self.images:
+            return
+        count = 0
+        for i, img in enumerate(self.images):
+            try:
+                tparams = self._currentThreshParams()
+                sparams = self._currentSepParams()
+                binary, labels, _ = runSeparationPipeline(img, tparams, sparams)
+                self.binaries[i] = binary
+                self.labels[i]   = labels
+                count += 1
+            except Exception as e:
+                print(f"Apply error on {i}: {e}")
+        messagebox.showinfo("Apply", f"Applied to {count}/{len(self.images)} images.")
+        self._recomputePreview()
+
+    def saveMasks(self):
+        if not any(self.binaries):
+            messagebox.showwarning("Save", "No masks to save. Apply to current or all first.")
+            return
+        outDir = filedialog.askdirectory(title="Choose output folder for masks")
+        if not outDir:
+            return
+        saved = 0
+        for i, m in enumerate(self.binaries):
+            if m is None: continue
+            name = os.path.splitext(os.path.basename(self.paths[i]))[0]
+            path = os.path.join(outDir, f"{name}_mask.png")
+            cv2.imwrite(path, m)
+            saved += 1
+        messagebox.showinfo("Save", f"Saved {saved} mask(s) to {outDir}.")
+
+    def saveLabels(self):
+        if not any(self.labels):
+            messagebox.showwarning("Save", "No labels to save. Apply first.")
+            return
+        outDir = filedialog.askdirectory(title="Choose output folder for labels")
+        if not outDir:
+            return
+        saved = 0
+        for i, L in enumerate(self.labels):
+            if L is None: continue
+            name = os.path.splitext(os.path.basename(self.paths[i]))[0]
+            # Save color preview and raw .npy
+            color = labelsToColor(L, bgGray=None, alpha=0.0)
+            cv2.imwrite(os.path.join(outDir, f"{name}_labels_color.png"), color)
+            np.save(os.path.join(outDir, f"{name}_labels.npy"), L.astype(np.int32))
+            saved += 1
+        messagebox.showinfo("Save", f"Saved {saved} labeled file(s) to {outDir}.")

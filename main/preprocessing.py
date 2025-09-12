@@ -7,6 +7,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 from typing import List, Tuple, Optional, Dict
+import processing_gui
 
 # Types
 Rect = Tuple[int, int, int, int]  # (x0, y0, x1, y1) inclusive-exclusive style

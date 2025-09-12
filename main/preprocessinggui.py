@@ -68,7 +68,8 @@ class PreprocessApp:
         self.cropAllVar = tk.BooleanVar(value=True)  # default apply to all
         ttk.Button(self.toolbar, text="Batch Crop", command=self.onBatchCropClick).pack(side="left", padx=6)
         ttk.Checkbutton(self.toolbar, text="Use relative margins", variable=self.cropAllVar).pack(side="left", padx=6)
-
+        ttk.Button(self.toolbar, text="Proceed with Processing", command=self.onProceedProcessing)\
+   .pack(side="left", padx=12)
         self.statusVar = tk.StringVar(value="No images loaded")
         ttk.Label(self.toolbar, textvariable=self.statusVar).pack(side="left", padx=12)
 
@@ -111,6 +112,20 @@ class PreprocessApp:
                 viewer.useMarginsVar.set(bool(self.cropAllVar.get()))
         except Exception:
             pass
+
+    def onProceedProcessing(self):
+        if not getattr(self, "images", None):
+            messagebox.showwarning("Processing", "Load images first.")
+            return
+        # Make sure 'scales' exists; older Part 1 may not have it
+        if not hasattr(self, "scales") or self.scales is None or len(self.scales) != len(self.images):
+            self.scales = [None] * len(self.images)
+        processing_gui.ProcessingWindow(
+            parent=self.master,
+            images=self.images,
+            paths=self.paths,
+            scales=self.scales
+        )
 
     # --------------------------- Image loading ---------------------------
 
