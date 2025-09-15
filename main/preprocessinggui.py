@@ -21,7 +21,7 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 from typing import List, Optional, Tuple, Dict
 import preprocessing
 from PIL import Image, ImageTk
-
+import processing_gui
 # Pillow resampling shim
 if hasattr(Image, "Resampling"):  # Pillow >= 9.1 (incl. 10+)
     RESAMPLE_LANCZOS = Image.Resampling.LANCZOS
