@@ -22,6 +22,45 @@ from processing import (
     runSeparationPipeline,
     labelsToColor,
 )
+class BusyDialog(tk.Toplevel):
+    def __init__(self, parent, title="Working…", mode="indeterminate", maximum=100):
+        super().__init__(parent)
+        self.title(title)
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()  # block interaction with parent
+        self.protocol("WM_DELETE_WINDOW", lambda: None)  # disable close
+        self._pickPointCanvas = None  # (x,y) on left canvas for marker
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+        ttk.Label(frm, text=title).pack(anchor="w", pady=(0,8))
+        self.pb = ttk.Progressbar(frm, orient="horizontal", length=360,
+                                  mode=mode, maximum=maximum)
+        self.pb.pack(fill="x")
+        if mode == "indeterminate":
+            self.pb.start(10)  # ms
+        self.update_idletasks()
+
+    def set_progress(self, value):
+        # Only for 'determinate'
+        try:
+            self.pb["value"] = value
+            self.update_idletasks()
+        except Exception:
+            pass
+
+    def close(self):
+        try:
+            if str(self.pb["mode"]) == "indeterminate":
+                self.pb.stop()
+        except Exception:
+            pass
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+        self.destroy()
+
 
 class ProcessingWindow(tk.Toplevel):
     def __init__(self, parent,
@@ -106,6 +145,14 @@ class ProcessingWindow(tk.Toplevel):
 
         ttk.Checkbutton(top, text="Use defaults", variable=self.useDefaultsVar).pack(side="left", padx=12)
         ttk.Button(top, text="Advanced…", command=self.openAdvancedDialog).pack(side="left")
+        # after Advanced… button
+        self.autoPreviewVar = tk.BooleanVar(value=True)
+        ttk.Checkbutton(top, text="Auto preview", variable=self.autoPreviewVar).pack(side="left", padx=8)
+        ttk.Button(top, text="Recompute", command=self.recomputeNow).pack(side="left", padx=4)
+
+        # ADD THIS LINE to start in manual mode:
+        self.autoPreviewVar.set(False)
+
 
         ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=10)
 
@@ -165,17 +212,55 @@ class ProcessingWindow(tk.Toplevel):
         ttk.Button(bottom, text="Save Labels…", command=self.saveLabels).pack(side="left", padx=6)
 
     def _bindEvents(self):
-        for var in (self.methodVar, self.useDefaultsVar, self.polarityVar,
-                    self.sepMethodVar, self.fillHolesVar, self.minAreaVar, self.distanceBlurVar,
-                    self.peakMinDistVar, self.peakRelThrVar, self.connectivityVar,
-                    self.clearBorderVar, self.overlayAlphaVar, self.viewModeVar, self.overlayOnOriginalVar):
-            var.trace_add("write", lambda *_: self._recomputePreview())
-        self.pickValueVar.trace_add("write", lambda *_: self._recomputePreview())
-        self.pickTolVar.trace_add("write", lambda *_: self._recomputePreview())
+        def bind_var(var):
+            var.trace_add("write", self._onParamChanged)
+
+        for var in (
+            self.methodVar, self.useDefaultsVar, self.polarityVar,
+            self.sepMethodVar, self.fillHolesVar, self.minAreaVar, self.distanceBlurVar,
+            self.peakMinDistVar, self.peakRelThrVar, self.connectivityVar,
+            self.clearBorderVar, self.overlayAlphaVar, self.viewModeVar, self.overlayOnOriginalVar
+        ):
+            bind_var(var)
+
+        self.pickValueVar.trace_add("write", self._onParamChanged)
+        self.pickTolVar.trace_add("write", self._onParamChanged)
 
         self.leftCanvas.bind("<Button-1>", self._onLeftClickPick)
+
+        # IMPORTANT: these used to call _recomputePreview(). Change to the gated handler:
         self.leftCanvas.bind("<Configure>", lambda e: self._showCurrent())
-        self.rightCanvas.bind("<Configure>", lambda e: self._recomputePreview())
+        self.rightCanvas.bind("<Configure>", lambda e: self._onParamChanged())
+        # After binding other vars...
+        self.methodVar.trace_add("write", lambda *_: self._refreshCursor())
+        self.pickModeVar.trace_add("write", lambda *_: self._refreshCursor())
+        
+    def _refreshCursor(self):
+        # Crosshair when method is 'pick' or explicit pick mode is enabled
+        use_cross = (self.methodVar.get() == "pick") or bool(self.pickModeVar.get())
+        try:
+            self.leftCanvas.config(cursor="crosshair" if use_cross else "")
+        except Exception:
+            pass
+
+
+    def _onParamChanged(self, *args):
+        # Only recompute automatically if Auto preview is ON
+        if self.autoPreviewVar.get():
+            self._recomputePreview()
+        else:
+            # Light hint in manual mode
+            self.statusVar.set("Params changed (manual mode). Click Recompute.")
+
+    def recomputeNow(self):
+        """Recompute preview with a modal progress bar (blocks UI)."""
+        dlg = BusyDialog(self, title="Recomputing preview…", mode="indeterminate")
+        try:
+            self._recomputePreview()
+        finally:
+            dlg.close()
+
+
 
     # ----------------- Navigation -----------------
 
@@ -214,16 +299,41 @@ class ProcessingWindow(tk.Toplevel):
         new_w = max(1, int(round(iw * s))); new_h = max(1, int(round(ih * s)))
         if (new_w, new_h) != (iw, ih):
             pilImg = pilImg.resize((new_w, new_h), resample=RESAMPLE_LANCZOS)
+        ox = (cw - new_w) // 2
+        oy = (ch - new_h) // 2
         canvas.delete("all")
         photo = ImageTk.PhotoImage(pilImg)
         setattr(self, photoAttr, photo)
         setattr(self, keepScaleAttr, s)
-        canvas.create_image((cw - new_w) // 2, (ch - new_h) // 2, anchor="nw", image=photo)
+        # remember placement so we can map clicks and draw markers
+        if keepScaleAttr == "_leftScale":
+            self._leftOrigin = (ox, oy)
+            self._leftDispSize = (new_w, new_h)
+        elif keepScaleAttr == "_rightScale":
+            self._rightOrigin = (ox, oy)
+            self._rightDispSize = (new_w, new_h)
+        canvas.create_image(ox, oy, anchor="nw", image=photo)
+
+    def _drawPickMarker(self):
+        # Draw small crosshair on left canvas at last pick point (canvas coords)
+        self.leftCanvas.delete("pick_marker")
+        if not self._pickPointCanvas:
+            return
+        x, y = self._pickPointCanvas
+        r = 6
+        self.leftCanvas.create_line(x - r, y, x + r, y, fill="#00eaff", width=2, tags="pick_marker")
+        self.leftCanvas.create_line(x, y - r, x, y + r, fill="#00eaff", width=2, tags="pick_marker")
+
 
     def _showCurrent(self):
         img = self.images[self.currentIndex]
         self._displayOn(self.leftCanvas, self._npToPil(img), "_leftScale", "_leftPhoto")
-        self._recomputePreview()
+
+        if self.autoPreviewVar.get():
+            self._recomputePreview()
+        else:
+            self.statusVar.set("Manual mode: press Recompute to update preview.")
+
         self.statusVar.set(f"{os.path.basename(self.paths[self.currentIndex])}  ({self.currentIndex+1}/{len(self.images)})")
 
     # ----------------- Parameters -----------------
@@ -257,6 +367,14 @@ class ProcessingWindow(tk.Toplevel):
             "overlayAlpha": float(self.overlayAlphaVar.get()),
         }
         return params
+
+    def _onParamChanged(self, *args):
+        # Only recompute automatically if Auto preview is ON
+        if self.autoPreviewVar.get():
+            self._recomputePreview()
+        else:
+            # Give a gentle hint in manual mode
+            self.statusVar.set("Params changed (manual mode). Click Recompute.")
 
     # ----------------- Preview -----------------
 
@@ -302,20 +420,50 @@ class ProcessingWindow(tk.Toplevel):
             a = cv2.normalize(a.astype(np.float32), None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
         return a
 
+
     # ----------------- Eyedropper -----------------
 
     def _onLeftClickPick(self, event):
-        if not self.pickModeVar.get() and self.methodVar.get() != "pick":
+        # Allow picking when in pick method OR when the explicit toggle is on
+        if not (self.methodVar.get() == "pick" or self.pickModeVar.get()):
             return
+
+        # Map canvas click -> image pixel
         img = self.images[self.currentIndex]
-        s = getattr(self, "_leftScale", 1.0)
-        x = int(event.x / max(s, 1e-6))
-        y = int(event.y / max(s, 1e-6))
         gray = self._prepGrayLocal(img)
+
+        # Get placement info of the left image on the canvas
+        ox, oy = getattr(self, "_leftOrigin", (0,0))
+        s = getattr(self, "_leftScale", 1.0)
+        # Position within the displayed image
+        dx = event.x - ox
+        dy = event.y - oy
+        # Reject clicks outside the image bounds
+        if dx < 0 or dy < 0:
+            return
+        disp_w, disp_h = getattr(self, "_leftDispSize", (gray.shape[1], gray.shape[0]))
+        if dx >= disp_w or dy >= disp_h:
+            return
+        # Convert to image pixel coords
+        px = int(dx / max(s, 1e-6))
+        py = int(dy / max(s, 1e-6))
         h, w = gray.shape[:2]
-        if 0 <= x < w and 0 <= y < h:
-            self.pickValueVar.set(int(gray[y, x]))
+        if px < 0 or py < 0 or px >= w or py >= h:
+            return
+
+        # Update pick value and visual marker
+        val = int(gray[py, px])
+        self.pickValueVar.set(val)
+        self._pickPointCanvas = (event.x, event.y)
+        self._drawPickMarker()
+        self.statusVar.set(f"Picked gray={val}")
+
+        # Only recompute automatically if Auto preview is ON
+        if self.autoPreviewVar.get():
             self._recomputePreview()
+        else:
+            self.statusVar.set(f"Picked gray={val} (manual mode). Click Recompute.")
+
 
     # ----------------- Advanced dialogs -----------------
 
@@ -409,27 +557,37 @@ class ProcessingWindow(tk.Toplevel):
         if not hasattr(self, "_lastBinary"):
             messagebox.showwarning("Apply", "Nothing to apply yet.")
             return
-        idx = self.currentIndex
-        self.binaries[idx] = None if self._lastBinary is None else self._lastBinary.copy()
-        self.labels[idx]   = None if self._lastLabels is None else self._lastLabels.copy()
+        dlg = BusyDialog(self, title="Applying to current (full-res)…", mode="indeterminate")
+        try:
+            idx = self.currentIndex
+            self.binaries[idx] = None if self._lastBinary is None else self._lastBinary.copy()
+            self.labels[idx]   = None if self._lastLabels is None else self._lastLabels.copy()
+        finally:
+            dlg.close()
         messagebox.showinfo("Apply", "Applied to current image.")
+
 
     def applyToAll(self):
         if not self.images:
             return
-        count = 0
-        for i, img in enumerate(self.images):
-            try:
-                tparams = self._currentThreshParams()
-                sparams = self._currentSepParams()
-                binary, labels, _ = runSeparationPipeline(img, tparams, sparams)
-                self.binaries[i] = binary
-                self.labels[i]   = labels
-                count += 1
-            except Exception as e:
-                print(f"Apply error on {i}: {e}")
-        messagebox.showinfo("Apply", f"Applied to {count}/{len(self.images)} images.")
-        self._recomputePreview()
+        tparams = self._currentThreshParams()
+        sparams = self._currentSepParams()
+        dlg = BusyDialog(self, title="Applying to all (full-res)…", mode="determinate", maximum=len(self.images))
+        saved = 0
+        try:
+            for i, img in enumerate(self.images):
+                try:
+                    binary, labels, _ = runSeparationPipeline(img, tparams, sparams)
+                    self.binaries[i] = binary
+                    self.labels[i]   = labels
+                    saved += 1
+                except Exception as e:
+                    print(f"Apply error on {i}: {e}")
+                dlg.set_progress(i + 1)
+        finally:
+            dlg.close()
+        messagebox.showinfo("Apply", f"Applied to {saved}/{len(self.images)} images.")
+        # Do not auto-preview here; user can press Recompute if desired
 
     def saveMasks(self):
         if not any(self.binaries):
