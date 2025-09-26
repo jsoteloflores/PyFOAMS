@@ -22,6 +22,43 @@ from processing import (
     runSeparationPipeline,
     labelsToColor,
 )
+
+class BusyDialog(tk.Toplevel):
+    def __init__(self, parent, title="Working…", mode="indeterminate", maximum=100):
+        super().__init__(parent)
+        self.title(title)
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", lambda: None)
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+        ttk.Label(frm, text=title).pack(anchor="w", pady=(0,8))
+        self.pb = ttk.Progressbar(frm, orient="horizontal", length=360,
+                                  mode=mode, maximum=maximum)
+        self.pb.pack(fill="x")
+        if mode == "indeterminate":
+            self.pb.start(10)
+        self.update_idletasks()
+    def set_progress(self, v):
+        try:
+            self.pb["value"] = v
+            self.update_idletasks()
+        except Exception:
+            pass
+    def close(self):
+        try:
+            if str(self.pb["mode"]) == "indeterminate":
+                self.pb.stop()
+        except Exception:
+            pass
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+        self.destroy()
+
+
 class BusyDialog(tk.Toplevel):
     def __init__(self, parent, title="Working…", mode="indeterminate", maximum=100):
         super().__init__(parent)
@@ -64,23 +101,25 @@ class BusyDialog(tk.Toplevel):
 
 class ProcessingWindow(tk.Toplevel):
     def __init__(self, parent,
-                 images: List[np.ndarray],
-                 paths: Optional[List[str]] = None,
-                 scales: Optional[List[Optional[Dict[str, float | str]]]] = None):
+                 images,
+                 paths=None,
+                 scales=None,
+                 resultsCallback=None):  # <-- NEW
         super().__init__(parent)
         self.title("PyFOAMS – Processing (Threshold + Separation)")
         self.transient(parent)
         self.grab_set()
 
-        # Data
         self.images = images
         self.paths = paths or [f"Image {i+1}" for i in range(len(images))]
         self.scales = scales or [None] * len(images)
-        self.currentIndex = 0
 
-        # Outputs
-        self.binaries: List[Optional[np.ndarray]] = [None] * len(images)
-        self.labels:   List[Optional[np.ndarray]] = [None] * len(images)
+        # NEW: callback into preprocessing_gui so thumbnails can update
+        self.resultsCallback = resultsCallback
+
+        # ensure outputs are allocated
+        self.binaries = [None] * len(self.images)
+        self.labels   = [None] * len(self.images)
 
         # Settings (copy defaults)
         self.settings = {
@@ -554,27 +593,70 @@ class ProcessingWindow(tk.Toplevel):
     # ----------------- Apply / Save -----------------
 
     def applyToCurrent(self):
+        # Must have a computed preview
         if not hasattr(self, "_lastBinary"):
             messagebox.showwarning("Apply", "Nothing to apply yet.")
             return
+
+        idx = self.currentIndex
+        n = len(self.images)
+        if not hasattr(self, "binaries") or len(self.binaries) != n:
+            self.binaries = [None] * n
+        if not hasattr(self, "labels") or len(self.labels) != n:
+            self.labels = [None] * n
+
         dlg = BusyDialog(self, title="Applying to current (full-res)…", mode="indeterminate")
         try:
-            idx = self.currentIndex
-            self.binaries[idx] = None if self._lastBinary is None else self._lastBinary.copy()
-            self.labels[idx]   = None if self._lastLabels is None else self._lastLabels.copy()
+            try: self.attributes("-disabled", True)
+            except Exception: pass
+            try: self.config(cursor="watch")
+            except Exception: pass
+
+            self.binaries[idx] = self._lastBinary.copy() if getattr(self, "_lastBinary", None) is not None else None
+            self.labels[idx]   = self._lastLabels.copy()  if getattr(self, "_lastLabels", None)  is not None else None
+
+            cb = getattr(self, "resultsCallback", None)
+            if callable(cb):
+                try:
+                    cb(self.binaries)
+                except Exception as e:
+                    print("resultsCallback error:", e)
+
+            try: self.update_idletasks()
+            except Exception: pass
+
         finally:
             dlg.close()
-        messagebox.showinfo("Apply", "Applied to current image.")
+            try: self.config(cursor="")
+            except Exception: pass
+            try: self.attributes("-disabled", False)
+            except Exception: pass
+
+        messagebox.showinfo("Apply", f"Applied to current image ({idx+1}/{n}).")
+
 
 
     def applyToAll(self):
         if not self.images:
             return
+
+        n = len(self.images)
+        if not hasattr(self, "binaries") or len(self.binaries) != n:
+            self.binaries = [None] * n
+        if not hasattr(self, "labels") or len(self.labels) != n:
+            self.labels = [None] * n
+
         tparams = self._currentThreshParams()
         sparams = self._currentSepParams()
-        dlg = BusyDialog(self, title="Applying to all (full-res)…", mode="determinate", maximum=len(self.images))
+
+        dlg = BusyDialog(self, title="Applying to all (full-res)…", mode="determinate", maximum=n)
         saved = 0
         try:
+            try: self.attributes("-disabled", True)
+            except Exception: pass
+            try: self.config(cursor="watch")
+            except Exception: pass
+
             for i, img in enumerate(self.images):
                 try:
                     binary, labels, _ = runSeparationPipeline(img, tparams, sparams)
@@ -583,11 +665,26 @@ class ProcessingWindow(tk.Toplevel):
                     saved += 1
                 except Exception as e:
                     print(f"Apply error on {i}: {e}")
-                dlg.set_progress(i + 1)
+                finally:
+                    dlg.set_progress(i + 1)
+                    try: self.update_idletasks()
+                    except Exception: pass
         finally:
             dlg.close()
-        messagebox.showinfo("Apply", f"Applied to {saved}/{len(self.images)} images.")
-        # Do not auto-preview here; user can press Recompute if desired
+            try: self.config(cursor="")
+            except Exception: pass
+            try: self.attributes("-disabled", False)
+            except Exception: pass
+
+        cb = getattr(self, "resultsCallback", None)
+        if callable(cb):
+            try:
+                cb(self.binaries)
+            except Exception as e:
+                print("resultsCallback error:", e)
+
+        messagebox.showinfo("Apply", f"Applied to {saved}/{n} images.")
+
 
     def saveMasks(self):
         if not any(self.binaries):

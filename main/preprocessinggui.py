@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 # preprocessing_gui.py
 # Preprocessing GUI:
 # - Load up to 20 images
@@ -11,7 +13,10 @@
 #     * Manual scale entry (units/px or px/unit)
 #     * Per-image scale is displayed and stored
 
-from __future__ import annotations
+from tkinter import filedialog, messagebox
+
+import postprocessing_gui  # new editor
+
 import os
 import math
 import cv2
@@ -34,6 +39,96 @@ from preprocessing import (
     clampRectToImage, rectToMargins, marginsToRect
 )
 
+
+def _tk_parent(owner) -> tk.Misc:
+    """Return a valid Tk parent widget for dialogs."""
+    # If owner is already a Tk widget
+    if isinstance(owner, tk.Misc):
+        try:
+            return owner.winfo_toplevel()
+        except Exception:
+            pass
+    # Try common attributes you may have stored
+    for attr in ("root", "master", "parent"):
+        p = getattr(owner, attr, None)
+        if isinstance(p, tk.Misc):
+            try:
+                return p.winfo_toplevel()
+            except Exception:
+                return p
+    # Fallback to the default root (created by main)
+    root = tk._get_default_root()
+    if root is None:
+        raise RuntimeError("No Tk root available; create tk.Tk() before opening dialogs.")
+    return root
+
+
+MAX_IMAGES = 20
+PREVIEW_MAX_PIXELS = 1_200_000  # ~1.2 MP for thumbnails/grids
+
+class BusyDialog(tk.Toplevel):
+    def __init__(self, parent, title="Working…", mode="indeterminate", maximum=100):
+        if not isinstance(parent, tk.Misc):
+            parent = tk._get_default_root()
+        super().__init__(parent)
+        self.title(title)
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", lambda: None)
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+        ttk.Label(frm, text=title).pack(anchor="w", pady=(0,8))
+        self.pb = ttk.Progressbar(frm, orient="horizontal", length=360,
+                                  mode=mode, maximum=maximum)
+        self.pb.pack(fill="x")
+        if mode == "indeterminate":
+            self.pb.start(10)
+        self.update_idletasks()
+
+    def set_progress(self, value):
+        try:
+            self.pb["value"] = value
+            self.update_idletasks()
+        except Exception:
+            pass
+
+    def close(self):
+        try:
+            if str(self.pb["mode"]) == "indeterminate":
+                self.pb.stop()
+        except Exception:
+            pass
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+        self.destroy()
+
+def safeReadImage(path: str) -> np.ndarray:
+    """Robust image reader: handles Windows paths, 16-bit tiffs, alpha."""
+    data = np.fromfile(path, dtype=np.uint8)         # avoids Unicode path issues
+    img = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
+    if img is None:
+        raise ValueError(f"Could not read image: {path}")
+    if img.dtype == np.uint16:                       # scale 16-bit → 8-bit
+        img = (img / 257.0).astype(np.uint8)
+    if img.ndim == 3 and img.shape[2] == 4:          # drop alpha
+        img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+    if img.ndim == 3 and img.shape[2] == 1:          # squeeze single-channel
+        img = img[:, :, 0]
+    return img
+
+def makePreview(img: np.ndarray, max_pixels: int = PREVIEW_MAX_PIXELS) -> np.ndarray:
+    """Downscale for preview so the grid stays snappy."""
+    h, w = img.shape[:2]
+    pix = h * w
+    if pix <= max_pixels:
+        return img
+    s = (max_pixels / float(pix)) ** 0.5
+    new_w = max(1, int(w * s))
+    new_h = max(1, int(h * s))
+    return cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
 MAX_IMAGES = 20
 GRID_COLS = 5
 GRID_ROWS = 4  # capacity 20
@@ -44,8 +139,14 @@ Rect = Tuple[int, int, int, int]  # (x0,y0,x1,y1)
 class PreprocessApp:
     def __init__(self, master: tk.Tk):
         self.master = master
+        self.root = master
         self.master.title("PyFOAMS – Preprocessing")
-        self.images: List[np.ndarray] = []
+        self.images: list[np.ndarray] = []
+        self.previews: list[np.ndarray] = []
+        self.imagePaths: list[str] = []
+        self.thumbPhotos: list[ImageTk.PhotoImage] = []  # keep refs so Tk doesn’t GC
+        self.currentIndex = 0
+
         self.paths: List[str] = []
         self.selectedIndex: Optional[int] = None
 
@@ -54,6 +155,9 @@ class PreprocessApp:
 
         self._thumbPhotos: Dict[int, ImageTk.PhotoImage] = {}
         self._thumbSizes: Dict[int, Tuple[int, int]] = {}  # cached sizes per cell
+        self.masks: list[Optional[np.ndarray]] = []   # aligns 1:1 with self.images
+        self.displayModeVar = tk.StringVar(value="original")  # "original" | "mask" | "overlay"
+
 
         self._buildUi()
 
@@ -70,6 +174,14 @@ class PreprocessApp:
         ttk.Checkbutton(self.toolbar, text="Use relative margins", variable=self.cropAllVar).pack(side="left", padx=6)
         ttk.Button(self.toolbar, text="Proceed with Processing", command=self.onProceedProcessing)\
    .pack(side="left", padx=12)
+        ttk.Separator(self.toolbar, orient="vertical").pack(side="left", fill="y", padx=6)
+
+        ttk.Label(self.toolbar, text="Thumbs:").pack(side="left")
+        for txt, val in [("Original", "original"), ("Mask", "mask"), ("Overlay", "overlay")]:
+            ttk.Radiobutton(self.toolbar, text=txt, value=val, variable=self.displayModeVar, command=self._redrawAllThumbs).pack(side="left", padx=4)
+
+        ttk.Button(self.toolbar, text="Edit Masks…", command=self.onOpenEditor).pack(side="left", padx=10)
+
         self.statusVar = tk.StringVar(value="No images loaded")
         ttk.Label(self.toolbar, textvariable=self.statusVar).pack(side="left", padx=12)
 
@@ -117,55 +229,119 @@ class PreprocessApp:
         if not getattr(self, "images", None):
             messagebox.showwarning("Processing", "Load images first.")
             return
-        # Make sure 'scales' exists; older Part 1 may not have it
-        if not hasattr(self, "scales") or self.scales is None or len(self.scales) != len(self.images):
-            self.scales = [None] * len(self.images)
-        processing_gui.ProcessingWindow(
+
+        def _receive_from_processing(binaries):
+            self.masks = binaries
+            self._redrawAllThumbs()
+            self.statusVar.set("Received masks from Processing.")
+
+        win = processing_gui.ProcessingWindow(
             parent=self.master,
             images=self.images,
             paths=self.paths,
-            scales=self.scales
+            scales=self.scales if hasattr(self, "scales") else [None] * len(self.images)
+            # <-- no resultsCallback here
         )
+        # Set it after construction (works no matter which version is imported)
+        setattr(win, "resultsCallback", _receive_from_processing)
 
     # --------------------------- Image loading ---------------------------
 
     def onLoad(self):
+        """Legacy hook from toolbar: call the robust multi-select loader."""
+        return self.onOpenImages()
+
+    def onOpenImages(self):
+        """Open up to MAX_IMAGES images, create previews, render grid."""
+        from tkinter import filedialog, messagebox
         paths = filedialog.askopenfilenames(
-            title="Select up to 20 images",
+            title=f"Select up to {MAX_IMAGES} images",
             filetypes=[("Images", "*.png;*.jpg;*.jpeg;*.tif;*.tiff;*.bmp")]
         )
         if not paths:
             return
-        if len(paths) > MAX_IMAGES:
-            messagebox.showwarning("Load", f"Selected {len(paths)} images; only first {MAX_IMAGES} will be used.")
-            paths = paths[:MAX_IMAGES]
 
-        imgs: List[np.ndarray] = []
-        ok: List[str] = []
-        for p in paths:
-            try:
-                img = loadImage(p, asGray=False)  # show color if present; grayscale later if needed
-                imgs.append(img)
-                ok.append(p)
-            except Exception as e:
-                print(f"Load failed for {p}: {e}")
+        # Cap count
+        paths = paths[:MAX_IMAGES]
+
+        imgs, thumbs, ok_paths, errs = [], [], [], []
+        dlg = None
+        try:
+            dlg = BusyDialog(self.root, title="Loading images…", mode="indeterminate")
+            for p in paths:
+                try:
+                    im = safeReadImage(p)
+                    imgs.append(im)
+                    thumbs.append(makePreview(im))
+                    ok_paths.append(p)
+                except Exception as e:
+                    errs.append(f"{os.path.basename(p)}: {e}")
+        finally:
+            if dlg: dlg.close()
 
         if not imgs:
-            messagebox.showerror("Load", "No images could be loaded.")
+            messagebox.showerror("Load images", "No images could be loaded." + ("\n" + "\n".join(errs[:6]) if errs else ""))
+            return
+        if errs:
+            messagebox.showwarning("Some images skipped", "Problems:\n" + "\n".join(errs[:8]))
+
+        # Store
+        self.images = imgs
+        self.previews = thumbs
+        self.imagePaths = ok_paths
+        self.paths = ok_paths
+        self.currentIndex = 0
+        self.scales = [None] * len(self.images) if not hasattr(self, "scales") or len(getattr(self, "scales", [])) != len(self.images) else self.scales
+        self.masks = [None] * len(self.images)   # start with no masks
+
+        # Render grid
+        self._renderGrid()
+
+    # --------------------------- Editing ---------------------------
+    def onOpenEditor(self):
+        if not self.images:
+            messagebox.showwarning("Post-processing", "Load images first.")
             return
 
-        self.images = imgs
-        self.paths = ok
-        self.scales = [None] * len(self.images)
-        self.selectedIndex = 0
-        self.statusVar.set(f"Loaded {len(self.images)} images. Double-click to enlarge; click to select.")
-        self._redrawAllThumbs()
+        def _receive_masks(new_masks: List[Optional[np.ndarray]]):
+            # Save and refresh thumbnails
+            self.masks = new_masks
+            self._redrawAllThumbs()
+            self.statusVar.set("Masks updated.")
+
+        postprocessing_gui.PostprocessWindow(
+            parent=self.master,
+            images=self.images,
+            masks=self.masks,
+            paths=self.paths,
+            startIndex=self.selectedIndex or 0,
+            onMasksUpdated=_receive_masks
+        )
 
     # --------------------------- Grid rendering ---------------------------
 
     def _redrawAllThumbs(self):
         for i in range(GRID_ROWS * GRID_COLS):
             self._redrawThumb(i)
+
+    def _onThumbClick(self, idx: int):
+        """Select the clicked thumbnail and redraw the grid (adds blue outline)."""
+        if 0 <= idx < len(self.images):
+            self.selectedIndex = idx
+            self._redrawAllThumbs()
+
+
+    def _renderGrid(self):
+        """Refresh all 5x4 canvases with the loaded images and update status."""
+        # If you want to use previews instead of full res, swap self.images -> self.previews below.
+        for i in range(GRID_ROWS * GRID_COLS):
+            self._redrawThumb(i)
+        n = len(self.images)
+        if n == 0:
+            self.statusVar.set("No images loaded")
+        else:
+            self.statusVar.set(f"Loaded {n} image(s)")
+
 
     def _redrawThumb(self, idx: int):
         canvas = self.cells[idx]
@@ -174,17 +350,38 @@ class PreprocessApp:
         if idx >= len(self.images):
             return
 
-        img = self.images[idx]
-        pil = self._npToPil(img)
-        cw = max(1, canvas.winfo_width())
-        ch = max(1, canvas.winfo_height())
+        # Use downscaled preview for speed
+        src = self.previews[idx] if idx < len(self.previews) else self.images[idx]
+        mode = self.displayModeVar.get()
+        mask = None
+        if idx < len(self.masks):
+            mask = self.masks[idx]
 
-        # Fit image to cell, no upscale beyond 1:1
+        # Build the thumbnail to display
+        if mode == "original" or mask is None:
+            show = src
+        elif mode == "mask":
+            if mask.ndim == 3:
+                mm = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+            else:
+                mm = mask
+            # Resize mask to preview size for display
+            mm_disp = cv2.resize(mm, (src.shape[1], src.shape[0]), interpolation=cv2.INTER_NEAREST)
+            show = mm_disp
+        else:  # overlay
+            if src.ndim == 2:
+                base = cv2.cvtColor(src, cv2.COLOR_GRAY2BGR)
+            else:
+                base = src
+            mm = mask if mask is not None else np.zeros(base.shape[:2], np.uint8)
+            mm_disp = cv2.resize(mm, (base.shape[1], base.shape[0]), interpolation=cv2.INTER_NEAREST)
+            show = self._thumbOverlay(base, mm_disp, alpha=0.45)
+
+        pil = self._npToPil(show)
+        cw = max(1, canvas.winfo_width()); ch = max(1, canvas.winfo_height())
         iw, ih = pil.size
-        s = min(cw / float(iw), ch / float(ih))
-        s = min(s, 1.0)
-        new_w = max(1, int(round(iw * s)))
-        new_h = max(1, int(round(ih * s)))
+        s = min(cw / float(iw), ch / float(ih)); s = min(s, 1.0)
+        new_w = max(1, int(round(iw * s))); new_h = max(1, int(round(ih * s)))
         if (new_w, new_h) != (iw, ih):
             pil = pil.resize((new_w, new_h), resample=RESAMPLE_LANCZOS)
 
@@ -192,14 +389,9 @@ class PreprocessApp:
         self._thumbPhotos[idx] = photo
         canvas.create_image((cw - new_w) // 2, (ch - new_h) // 2, anchor="nw", image=photo)
 
-        # Selection outline
         if self.selectedIndex == idx:
             canvas.create_rectangle(2, 2, cw - 2, ch - 2, outline="#66b3ff", width=2)
 
-    def _onThumbClick(self, idx: int):
-        if idx < len(self.images):
-            self.selectedIndex = idx
-            self._redrawAllThumbs()
 
     # --------------------------- Enlarged viewer ---------------------------
 
@@ -250,6 +442,19 @@ class PreprocessApp:
         # Fallback to grayscale
         g = a.mean(axis=2).astype(np.uint8) if a.ndim == 3 else a.astype(np.uint8)
         return Image.fromarray(g, mode="L")
+
+    def _thumbOverlay(self, base_bgr_or_gray: np.ndarray, mask: np.ndarray, alpha: float = 0.45) -> np.ndarray:
+        if mask is None:
+            return base_bgr_or_gray
+        if base_bgr_or_gray.ndim == 2:
+            base = cv2.cvtColor(base_bgr_or_gray, cv2.COLOR_GRAY2BGR)
+        else:
+            base = base_bgr_or_gray
+        m = (mask > 0).astype(np.uint8)
+        overlay = base.copy()
+        overlay[:, :, 1] = np.maximum(overlay[:, :, 1], m * 255)
+        overlay[:, :, 2] = np.maximum(overlay[:, :, 2], m * 255)
+        return cv2.addWeighted(overlay, alpha, base, 1.0 - alpha, 0)
 
 
 # ============================== Enlarged Viewer ==============================
