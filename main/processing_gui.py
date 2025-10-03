@@ -104,24 +104,26 @@ class ProcessingWindow(tk.Toplevel):
                  images,
                  paths=None,
                  scales=None,
-                 resultsCallback=None):  # <-- NEW
+                 resultsCallback=None):
         super().__init__(parent)
         self.title("PyFOAMS – Processing (Threshold + Separation)")
         self.transient(parent)
         self.grab_set()
 
+        # Core data
         self.images = images
         self.paths = paths or [f"Image {i+1}" for i in range(len(images))]
         self.scales = scales or [None] * len(images)
-
-        # NEW: callback into preprocessing_gui so thumbnails can update
         self.resultsCallback = resultsCallback
 
-        # ensure outputs are allocated
+        # Must exist before any _showCurrent() calls/bindings
+        self.currentIndex = 0
+
+        # Outputs
         self.binaries = [None] * len(self.images)
         self.labels   = [None] * len(self.images)
 
-        # Settings (copy defaults)
+        # Copy defaults/settings
         self.settings = {
             "common": dict(DEFAULTS["common"]),
             "otsu": dict(DEFAULTS["otsu"]),
@@ -141,7 +143,7 @@ class ProcessingWindow(tk.Toplevel):
         self.pickValueVar = tk.IntVar(value=128)
         self.pickTolVar = tk.IntVar(value=int(self.settings["pick"]["pickTolerance"]))
 
-        # Separation
+        # Separation vars
         self.sepMethodVar = tk.StringVar(value=self.settings["separation"]["method"])
         self.fillHolesVar = tk.BooleanVar(value=bool(self.settings["separation"]["fillHoles"]))
         self.minAreaVar = tk.IntVar(value=int(self.settings["separation"]["minAreaPx"]))
@@ -156,13 +158,30 @@ class ProcessingWindow(tk.Toplevel):
         self.viewModeVar = tk.StringVar(value="labels")  # "binary" | "labels"
         self.overlayOnOriginalVar = tk.BooleanVar(value=True)
 
-        # UI
+        # Left/right canvas state
+        self._leftPhoto = None
+        self._rightPhoto = None
+        self._leftScale = 1.0
+        self._rightScale = 1.0
+        self._leftOrigin = (0, 0)
+        self._rightOrigin = (0, 0)
+        self._leftDispSize = (0, 0)
+        self._rightDispSize = (0, 0)
+        self._pickPointCanvas = None  # used by eyedropper crosshair
+
+        # Build UI, bind, and show
         self._buildUi()
+
+        # Start in manual mode (no auto recompute)
+        self.autoPreviewVar.set(False)
+
         self._bindEvents()
-        self._showCurrent()
+        self.after_idle(self._showCurrent)  # <-- add this
+
 
         self.geometry("1280x800")
         self.minsize(980, 640)
+
 
     # ----------------- UI -----------------
 
@@ -365,6 +384,8 @@ class ProcessingWindow(tk.Toplevel):
 
 
     def _showCurrent(self):
+        if not hasattr(self, "currentIndex"):
+            self.currentIndex = 0
         img = self.images[self.currentIndex]
         self._displayOn(self.leftCanvas, self._npToPil(img), "_leftScale", "_leftPhoto")
 
