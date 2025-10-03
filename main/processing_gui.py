@@ -16,6 +16,9 @@ if hasattr(Image, "Resampling"):
 else:
     RESAMPLE_LANCZOS = getattr(Image, "LANCZOS", Image.BICUBIC)
 
+import stereology
+import stereology_gui
+
 from processing import (
     DEFAULTS,
     thresholdImageAdvanced,
@@ -268,6 +271,10 @@ class ProcessingWindow(tk.Toplevel):
         ttk.Button(bottom, text="Apply to All", command=self.applyToAll).pack(side="left", padx=6)
         ttk.Button(bottom, text="Save Masks…", command=self.saveMasks).pack(side="left", padx=6)
         ttk.Button(bottom, text="Save Labels…", command=self.saveLabels).pack(side="left", padx=6)
+        ttk.Button(bottom, text="Stereology…", command=self.openStereology).pack(side="left", padx=6)
+
+        ttk.Button(bottom, text="Export Measurements…", command=self.exportMeasurements).pack(side="left", padx=6)
+
 
     def _bindEvents(self):
         def bind_var(var):
@@ -611,6 +618,73 @@ class ProcessingWindow(tk.Toplevel):
         else:
             self.pickPanel.forget()
 
+
+    def exportMeasurements(self):
+        """
+        Run stereology on current labels array(s) and export a CSV.
+        Also optionally save colorized label previews if user chooses a folder.
+        """
+        # sanity
+        if not any(L is not None for L in getattr(self, "labels", [])):
+            messagebox.showwarning("Stereology", "No labels available. Apply to current or all first.")
+            return
+
+        # choose CSV path
+        out_csv = filedialog.asksaveasfilename(
+            title="Save pore measurements CSV",
+            defaultextension=".csv",
+            filetypes=[("CSV", "*.csv")]
+        )
+        if not out_csv:
+            return
+
+        # run measurements across images
+        try:
+            props = stereology.measure_dataset(self.labels, getattr(self, "scales", None))
+            stereology.save_props_csv(out_csv, props)
+        except Exception as e:
+            messagebox.showerror("Export", f"Failed to compute/export measurements:\n{e}")
+            return
+
+        # offer to save color previews (optional)
+        if messagebox.askyesno("Export", "Measurements saved.\n\nAlso save colorized label previews?"):
+            out_dir = filedialog.askdirectory(title="Choose folder for colorized labels")
+            if out_dir:
+                saved = 0
+                for i, L in enumerate(self.labels):
+                    if L is None:
+                        continue
+                    # background for overlay if user is in "overlay on original" mode:
+                    bg = None
+                    if self.overlayOnOriginalVar.get():
+                        bg = self._prepGrayLocal(self.images[i])
+                    color = stereology.colorize_labels(L, seed=123 + i, bg_gray=bg, alpha=float(self.overlayAlphaVar.get()))
+                    name = os.path.splitext(os.path.basename(self.paths[i]))[0]
+                    cv2.imwrite(os.path.join(out_dir, f"{name}_labels_color.png"), color)
+                    saved += 1
+                messagebox.showinfo("Export", f"Saved {saved} colorized label image(s).")
+            else:
+                messagebox.showinfo("Export", "Measurements saved (no images exported).")
+        else:
+            messagebox.showinfo("Export", "Measurements saved.")
+
+    
+    def openStereology(self):
+        if not any(L is not None for L in getattr(self, "labels", [])):
+            messagebox.showwarning("Stereology", "No labels available. Apply to current or all first.")
+            return
+        try:
+            stereology_gui.StereologyWindow(
+                parent=self,
+                images=self.images,
+                labels=self.labels,
+                paths=self.paths,
+                scales=getattr(self, "scales", None),
+                start_index=self.currentIndex if hasattr(self, "currentIndex") else 0
+            )
+        except Exception as e:
+            messagebox.showerror("Stereology", f"Failed to open stereology window:\n{e}")
+
     # ----------------- Apply / Save -----------------
 
     def applyToCurrent(self):
@@ -740,3 +814,5 @@ class ProcessingWindow(tk.Toplevel):
             np.save(os.path.join(outDir, f"{name}_labels.npy"), L.astype(np.int32))
             saved += 1
         messagebox.showinfo("Save", f"Saved {saved} labeled file(s) to {outDir}.")
+    
+    
