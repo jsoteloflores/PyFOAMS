@@ -136,6 +136,10 @@ class StereologyWindow(tk.Toplevel):
                                  ])
         metric_cb.pack(side="left")
         metric_cb.bind("<<ComboboxSelected>>", lambda e: self._compute_and_plot())
+        metric_cb.bind("<<ComboboxSelected>>", lambda e: self._compute_and_plot())
+
+        ttk.Button(top, text="Help (?)", command=self._open_metrics_help)\
+        .pack(side="left", padx=(6, 10))
 
         ttk.Label(top, text="Bins:").pack(side="left", padx=(10,2))
         ttk.Spinbox(top, from_=5, to=200, textvariable=self.binsVar, width=5,
@@ -445,6 +449,81 @@ class StereologyWindow(tk.Toplevel):
             self.ax.grid(True, alpha=0.25, linestyle="--")
             self.ax.set_title(f"N = {vals.size}")
         self.canvas_mpl.draw_idle()
+
+    def _open_metrics_help(self):
+        # Modal, scrollable help window
+        dlg = tk.Toplevel(self)
+        dlg.title("Stereology metrics – Help")
+        dlg.transient(self)
+        dlg.grab_set()
+        dlg.geometry("620x540")
+
+        container = ttk.Frame(dlg, padding=12)
+        container.pack(fill="both", expand=True)
+
+        txt = tk.Text(container, wrap="word")
+        vsb = ttk.Scrollbar(container, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=vsb.set)
+
+        vsb.pack(side="right", fill="y")
+        txt.pack(side="left", fill="both", expand=True)
+
+        HELP = (
+            "METRICS (per labeled pore)\n"
+            "\n"
+            "• Area (area / area_px / area_units2)\n"
+            "  Pixel count inside the pore. If a scale is provided, it’s converted to units².\n"
+            "\n"
+            "• Equivalent diameter (eq_diam / eq_diam_px / eq_diam_units)\n"
+            "  Diameter of a circle with the same area:\n"
+            "      eq_diam = sqrt(4 · A / π)\n"
+            "  A is area in px² (or in units² when scaled). Useful as a size proxy.\n"
+            "\n"
+            "• Circularity (4πA / P²)\n"
+            "  1.0 for a perfect circle; smaller values indicate elongation/irregularity.\n"
+            "  P is perimeter along the pixel boundary (discrete estimate).\n"
+            "\n"
+            "• Max Feret / Min Feret (feret_max / feret_min)\n"
+            "  Caliper diameters: the maximum and minimum distances between two parallel\n"
+            "  tangents of the pore. Approximated via a minimum-area rotated rectangle or\n"
+            "  rotating-calipers on the contour. Reported in px or scaled units.\n"
+            "\n"
+            "• Ellipse major / minor axis (major_axis / minor_axis)\n"
+            "  Axes of the best-fit ellipse (from image moments / cv2.fitEllipse).\n"
+            "  Often close to Feret lengths but not identical for irregular shapes.\n"
+            "\n"
+            "• Aspect ratio (aspect_ratio)\n"
+            "  major_axis / minor_axis (≥ 1). Larger means more elongated.\n"
+            "\n"
+            "• Orientation (orientation_deg)\n"
+            "  Angle (degrees) of the fitted ellipse’s major axis relative to +x (image\n"
+            "  columns), increasing counter-clockwise. Note: for highly concave shapes,\n"
+            "  ellipse fit may be less representative.\n"
+            "\n"
+            "• Border-touching (touches_border)\n"
+            "  True if the pore contacts the image edge. Such pores are often excluded\n"
+            "  from size statistics to avoid truncation bias.\n"
+            "\n"
+            "PLOTTING & FILTERS\n"
+            "• Aggregation: ‘Current image’ plots only the active frame; ‘All images’ builds\n"
+            "  an aggregate across the dataset.\n"
+            "• Units: switch between pixels and calibrated units (enabled when a common\n"
+            "  scale exists). Length metrics convert with your units/px; areas with (units/px)².\n"
+            "• Area filter: keep pores within [min, max] (0 = no bound); applied in the\n"
+            "  currently selected units mode.\n"
+            "• Exclude border-touching: removes censored pores from the distributions.\n"
+            "• Bins / Log Y: control histogram bin count and y-axis scaling.\n"
+        )
+
+        txt.insert("1.0", HELP)
+        txt.configure(state="disabled")
+
+        # Close button row
+        btns = ttk.Frame(dlg, padding=(0,8,0,0))
+        btns.pack(side="bottom", fill="x")
+        ttk.Button(btns, text="Close", command=dlg.destroy).pack(side="right")
+
+
 
     # ------------- actions -------------
 
